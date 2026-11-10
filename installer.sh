@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-INSTALLER_VERSION="2.1.0"
+if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3))); then
+    echo "PteroArch needs bash 4.3 or newer (this is $BASH_VERSION)." >&2
+    exit 1
+fi
+
+INSTALLER_VERSION="2.2.0"
 DEFAULT_PANEL_VERSION="v1.15.2"
 
 PANEL_DIR=/var/www/pterodactyl
@@ -22,9 +27,26 @@ VERBOSE=false
 OWN_STATE=false
 NO_COLOR_FLAG=false
 NO_ANIM_FLAG=false
+KEYS_FLAG=true
+SYMBOLS=auto
 HELP=''
 SPIN_OUT=''
+SPIN_SEQ=0
 INSTALL_T0=0
+BG_DIR=''
+declare -A BG_STARTED=()
+
+# Wizard navigation state (see run_step)
+IN_STEP=false
+HAS_PREV=false
+EDITING=false
+Q_COUNT=0
+PAUSE_KEY=''
+PW_WAS_GENERATED=false
+PW_KEPT=false
+PHP_CUR_VER=''
+PHP_LEG_VER=''
+REPO_HAS_LEGACY=unknown
 
 ANSWER_VARS=(
     MODE PANEL_VERSION
@@ -50,11 +72,78 @@ LOGO=(
 )
 
 # ── Look & feel ──
-init_ui() {
-    local loc="${LC_ALL:-${LC_CTYPE:-${LANG:-}}}"
-    UNICODE=false
-    [[ ${loc^^} == *UTF-8* || ${loc^^} == *UTF8* ]] && UNICODE=true
+# Three symbol sets, so the screen looks right everywhere:
+#   rich  - graphical terminals with a normal font setup
+#   basic - only Latin-1 + box-drawing lines (the Linux console, bare-bones fonts)
+#   ascii - plain 7-bit text (serial consoles, non-UTF-8 locales)
+set_symbols() {
+    SYM=$1
+    case $SYM in
+    rich)
+        I_OK="✓" I_BAD="✗" I_WARN="▲" I_INFO="●" I_ARROW="❯" I_DOT="·" I_BUL="•"
+        I_ENTER="↵" I_SKIP="↷" I_ELL="…" I_RON="●" I_ROFF="○"
+        H="─" HB="━" BAR_F="━" BAR_E="─"
+        BX_TL="╭" BX_TR="╮" BX_BL="╰" BX_BR="╯" BX_V="│"
+        SPIN_FRAMES=(◜ ◠ ◝ ◞ ◡ ◟)
+        SPARKS=("✦" "✧" "⋆" "✶" "·")
+        K_MOVE="↑↓" K_SIDE="←→" L_SEP=" · "
+        ;;
+    basic)
+        I_OK="+" I_BAD="x" I_WARN="!" I_INFO="i" I_ARROW="»" I_DOT="·" I_BUL="*"
+        I_ENTER="»" I_SKIP="~" I_ELL="..." I_RON="(*)" I_ROFF="( )"
+        H="─" HB="═" BAR_F="═" BAR_E="─"
+        BX_TL="┌" BX_TR="┐" BX_BL="└" BX_BR="┘" BX_V="│"
+        SPIN_FRAMES=('|' '/' '-' '\')
+        SPARKS=("*" "+" "·")
+        K_MOVE="Up/Down" K_SIDE="Left/Right" L_SEP=" · "
+        ;;
+    *)
+        SYM=ascii
+        I_OK="+" I_BAD="x" I_WARN="!" I_INFO="i" I_ARROW=">" I_DOT="." I_BUL="*"
+        I_ENTER=">" I_SKIP="~" I_ELL="..." I_RON="(*)" I_ROFF="( )"
+        H="-" HB="=" BAR_F="#" BAR_E="-"
+        BX_TL="+" BX_TR="+" BX_BL="+" BX_BR="+" BX_V="|"
+        SPIN_FRAMES=('|' '/' '-' '\')
+        SPARKS=("*" "+" ".")
+        K_MOVE="Up/Down" K_SIDE="Left/Right" L_SEP=", "
+        ;;
+    esac
+}
 
+is_utf8_locale() {
+    local loc="${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" probe="✓"
+    [[ ${loc^^} == *UTF-8* || ${loc^^} == *UTF8* ]] && ((${#probe} == 1))
+}
+
+cycle_symbols() {
+    case $SYM in
+    rich) set_symbols basic ;;
+    basic) set_symbols ascii ;;
+    *) set_symbols rich ;;
+    esac
+}
+
+measure() {
+    local sz=''
+    TERM_COLS=80
+    TERM_ROWS=24
+    if [[ -t 1 ]]; then
+        sz=$(stty size <"$TTY" 2>/dev/null || true)
+        if [[ $sz =~ ^([0-9]+)\ ([0-9]+)$ ]] && ((BASH_REMATCH[1] > 0 && BASH_REMATCH[2] > 0)); then
+            TERM_ROWS=${BASH_REMATCH[1]}
+            TERM_COLS=${BASH_REMATCH[2]}
+        else
+            sz=$(tput cols 2>/dev/null || true)
+            [[ $sz =~ ^[0-9]+$ ]] && ((sz > 0)) && TERM_COLS=$sz
+        fi
+    fi
+    COLS=$TERM_COLS
+    ((COLS > 100)) && COLS=100
+    ((COLS < 50)) && COLS=50
+    return 0
+}
+
+init_ui() {
     USE_COLOR=true
     ANIM=true
     [[ -t 1 ]] || {
@@ -104,65 +193,69 @@ init_ui() {
         fi
     fi
 
-    if $UNICODE; then
-        I_OK="✔"
-        I_BAD="✖"
-        I_WARN="▲"
-        I_INFO="ℹ"
-        I_ARROW="❯"
-        I_DOT="·"
-        I_BUL="•"
-        I_ENTER="↵"
-        I_SKIP="↷"
-        I_ELL="…"
-        H="─"
-        HB="━"
-        BAR_F="━"
-        BAR_E="─"
-        BX_TL="╭"
-        BX_TR="╮"
-        BX_BL="╰"
-        BX_BR="╯"
-        BX_V="│"
-        SPIN_FRAMES=(◜ ◠ ◝ ◞ ◡ ◟)
-        SPARKS=("✦" "✧" "⋆" "✶" "·")
-    else
-        I_OK="+"
-        I_BAD="x"
-        I_WARN="!"
-        I_INFO="i"
-        I_ARROW=">"
-        I_DOT="."
-        I_BUL="*"
-        I_ENTER=">"
-        I_SKIP="~"
-        I_ELL="..."
-        H="-"
-        HB="="
-        BAR_F="#"
-        BAR_E="-"
-        BX_TL="+"
-        BX_TR="+"
-        BX_BL="+"
-        BX_BR="+"
-        BX_V="|"
-        SPIN_FRAMES=('|' '/' '-' '\')
-        SPARKS=("*" "+" ".")
-    fi
-
-    COLS=$(tput cols 2>/dev/null || echo 80)
-    [[ $COLS =~ ^[0-9]+$ ]] || COLS=80
-    ((COLS > 100)) && COLS=100
-    ((COLS < 50)) && COLS=50
-
     if { : </dev/tty; } 2>/dev/null; then TTY=/dev/tty; else TTY=/dev/stdin; fi
     STTY_ORIG=''
-    [[ $TTY == /dev/tty ]] && STTY_ORIG=$(stty -g <"$TTY" 2>/dev/null)
+    [[ $TTY == /dev/tty ]] && STTY_ORIG=$(stty -g <"$TTY" 2>/dev/null || true)
+
+    # Symbols: honour --symbols, otherwise pick the safest set that still looks good.
+    local sym=$SYMBOLS
+    if [[ $sym == rich || $sym == basic ]] && ! is_utf8_locale; then
+        # Asked for Unicode in a non-UTF-8 locale: switch character handling to UTF-8 if the system can.
+        LC_ALL=C.UTF-8 2>/dev/null
+        export LC_ALL
+    fi
+    UTF8_LOCALE=false
+    is_utf8_locale && UTF8_LOCALE=true
+    if [[ $sym == auto ]]; then
+        sym=ascii
+        if $UTF8_LOCALE; then
+            sym=rich
+            case ${TERM:-dumb} in
+            linux* | cons* | dumb) sym=basic ;;           # kernel console: ~256 glyphs, no fallback fonts
+            vt[0-9]* | ansi* | pcansi* | sun*) sym=ascii ;; # serial lines and very old terminals
+            esac
+            # East-Asian locales often draw line/symbol characters double-width, which breaks alignment.
+            local loc="${LC_ALL:-${LC_CTYPE:-${LANG:-}}}"
+            case ${loc,,} in ja* | zh* | ko*) sym=ascii ;; esac
+        fi
+    fi
+    $UTF8_LOCALE || sym=ascii
+    set_symbols "$sym"
+
+    measure
+
+    # Arrow-key menus need a real terminal on both ends and a sane width.
+    KEYS=false
+    if $KEYS_FLAG && [[ $TTY == /dev/tty && -t 1 && ${TERM:-dumb} != dumb && -n $STTY_ORIG ]] && ((TERM_COLS >= 50)); then
+        KEYS=true
+    fi
+
+    BG_DIR=$(mktemp -d 2>/dev/null) || {
+        echo "Can't create a temporary directory (is /tmp writable?)." >&2
+        exit 1
+    }
 }
 
 restore_tty() {
     [[ -n ${STTY_ORIG:-} ]] && stty "$STTY_ORIG" <"$TTY" 2>/dev/null
     [[ -t 1 ]] && printf '%s\e[?25h' "${R:-}"
+    [[ -n ${BG_DIR:-} && -d $BG_DIR ]] && rm -rf "$BG_DIR"
+    return 0
+}
+
+echo_off() {
+    [[ $TTY == /dev/tty ]] && stty -echo <"$TTY" 2>/dev/null
+    return 0
+}
+echo_on() {
+    [[ $TTY == /dev/tty ]] && stty echo <"$TTY" 2>/dev/null
+    return 0
+}
+# Throw away keys typed while nobody was asking (e.g. during a long install step).
+flush_input() {
+    $KEYS || return 0
+    local _c
+    while IFS= read -rsn1 -t 0.01 _c <"$TTY"; do :; done
     return 0
 }
 
@@ -171,7 +264,56 @@ repeat() {
     printf -v s '%*s' "$2" ''
     printf '%s' "${s// /$1}"
 }
-strip() { sed 's/\x1b\[[0-9;]*m//g' <<<"$1"; }
+# Like repeat, but fork-free: the result lands in REPLY.
+rep() {
+    local s
+    printf -v s '%*s' "$2" ''
+    REPLY=${s// /$1}
+}
+# Visible length of a string (color codes don't count) -> REPLY.
+vlen() {
+    local s=$1 rest
+    while [[ $s == *$'\e['* ]]; do
+        rest=${s#*$'\e['}
+        s=${s%%$'\e['*}${rest#*m}
+    done
+    REPLY=${#s}
+}
+# Word-wrap text to a width -> WRAPPED array. Lines that already fit are kept as they are.
+wrap() {
+    local width=$2 para word line
+    local -a words
+    ((width < 10)) && width=10
+    WRAPPED=()
+    while IFS= read -r para || [[ -n $para ]]; do
+        if ((${#para} <= width)); then
+            WRAPPED+=("$para")
+            continue
+        fi
+        read -ra words <<<"$para"
+        line=''
+        for word in "${words[@]}"; do
+            while ((${#word} > width)); do
+                [[ -n $line ]] && {
+                    WRAPPED+=("$line")
+                    line=''
+                }
+                WRAPPED+=("${word:0:width}")
+                word=${word:width}
+            done
+            if [[ -z $line ]]; then
+                line=$word
+            elif ((${#line} + 1 + ${#word} <= width)); then
+                line+=" $word"
+            else
+                WRAPPED+=("$line")
+                line=$word
+            fi
+        done
+        [[ -n $line ]] && WRAPPED+=("$line")
+    done <<<"$1"
+    return 0
+}
 fmt_time() { printf '%d:%02d' $(($1 / 60)) $(($1 % 60)); }
 nap() {
     $ANIM && sleep "$1"
@@ -182,10 +324,25 @@ cls() {
     [[ -t 1 ]] && printf '\e[H\e[2J'
     return 0
 }
-rule() { printf '  %s%s%s\n' "$GRY" "$(repeat "$H" $((COLS - 4)))" "$R"; }
-say() { printf '%s\n' "$*" | fold -s -w "$((COLS - 4))" | sed 's/^/  /'; }
-dim() { printf '%s\n' "$*" | fold -s -w "$((COLS - 6))" | sed "s/^/  ${GRY}/; s/\$/${R}/"; }
-hint() { printf '%s\n' "$*" | fold -s -w "$((COLS - 10))" | sed "s/^/      ${GRY}/; s/\$/${R}/"; }
+rule() {
+    rep "$H" $((COLS - 4))
+    printf '  %s%s%s\n' "$GRY" "$REPLY" "$R"
+}
+say() {
+    local l
+    wrap "$*" $((COLS - 4))
+    for l in "${WRAPPED[@]}"; do printf '  %s\n' "$l"; done
+}
+dim() {
+    local l
+    wrap "$*" $((COLS - 6))
+    for l in "${WRAPPED[@]}"; do printf '  %s%s%s\n' "$GRY" "$l" "$R"; done
+}
+hint() {
+    local l
+    wrap "$*" $((COLS - 10))
+    for l in "${WRAPPED[@]}"; do printf '      %s%s%s\n' "$GRY" "$l" "$R"; done
+}
 ok() { printf '  %s%s%s %s\n' "$GRN" "$I_OK" "$R" "$*"; }
 warn() { printf '  %s%s%s %s\n' "$YEL" "$I_WARN" "$R" "$*"; }
 err() { printf '  %s%s%s %s\n' "$RED" "$I_BAD" "$R" "$*"; }
@@ -198,39 +355,52 @@ die() {
 blank() { echo; }
 kv() {
     local first=true l
-    while IFS= read -r l; do
+    wrap "$2" $((COLS - 31))
+    for l in "${WRAPPED[@]}"; do
         if $first; then
             printf '    %s%-22s%s %s\n' "$GRY" "$1" "$R" "$l"
             first=false
         else printf '    %-22s %s\n' '' "$l"; fi
-    done < <(printf '%s\n' "$2" | fold -s -w $((COLS - 31)))
+    done
 }
 title() { printf '  %s%s%s\n' "$B" "$*" "$R"; }
 
 box() {
     local c=$1 ttl=$2
     shift 2
-    local w=$((COLS - 6)) inner=$((COLS - 10)) line plain pad para fill
+    local w=$((COLS - 6)) inner=$((COLS - 10)) line pad para fill
+    local -a lines
     if [[ -n $ttl ]]; then
         fill=$((w - ${#ttl} - 5))
         ((fill < 0)) && fill=0
-        printf '  %s\n' "${c}${BX_TL}${H}${R} ${B}${ttl}${R} ${c}$(repeat "$H" "$fill")${BX_TR}${R}"
+        rep "$H" "$fill"
+        printf '  %s\n' "${c}${BX_TL}${H}${R} ${B}${ttl}${R} ${c}${REPLY}${BX_TR}${R}"
     else
-        printf '  %s\n' "${c}${BX_TL}$(repeat "$H" $((w - 2)))${BX_TR}${R}"
+        rep "$H" $((w - 2))
+        printf '  %s\n' "${c}${BX_TL}${REPLY}${BX_TR}${R}"
     fi
     for para in "$@"; do
-        while IFS= read -r line; do
-            plain=$(strip "$line")
-            pad=$((inner - ${#plain}))
+        if [[ $para == *$'\e'* ]]; then
+            mapfile -t lines <<<"$para"
+        else
+            wrap "$para" "$inner"
+            lines=("${WRAPPED[@]}")
+        fi
+        for line in "${lines[@]}"; do
+            vlen "$line"
+            pad=$((inner - REPLY))
             ((pad < 0)) && pad=0
             printf '  %s%s%s %s%*s %s%s%s\n' "$c" "$BX_V" "$R" "$line" "$pad" '' "$c" "$BX_V" "$R"
-        done < <(if [[ $para == *$'\e'* ]]; then printf '%s\n' "$para"; else printf '%s\n' "$para" | fold -s -w "$inner"; fi)
+        done
     done
-    printf '  %s\n' "${c}${BX_BL}$(repeat "$H" $((w - 2)))${BX_BR}${R}"
+    rep "$H" $((w - 2))
+    printf '  %s\n' "${c}${BX_BL}${REPLY}${BX_BR}${R}"
 }
 
 header() {
-    local ttl=$1 ctx=${2:-} n=${3:-0} total=${4:-0} brand w=$((COLS - 4))
+    local ttl=$1 ctx=${2:-} n=${3:-0} total=${4:-0} brand w
+    measure
+    w=$((COLS - 4))
     cls
     blank
     if $USE_COLOR; then brand="${BADGE} PteroArch ${R}"; else brand="[ PteroArch ]"; fi
@@ -239,8 +409,11 @@ header() {
     [[ -n $ctx ]] && printf '  %s%s%s %s%s%s' "$GRY" "$I_DOT" "$R" "$ACC2" "$ctx" "$R"
     printf '\n'
     if ((total > 0)); then
-        local f=$((w * n / total))
-        printf '  %s%s%s%s%s\n' "$BAR_ON" "$(repeat "$HB" "$f")" "$BAR_OFF" "$(repeat "$H" $((w - f)))" "$R"
+        local f=$((w * n / total)) on
+        rep "$HB" "$f"
+        on=$REPLY
+        rep "$H" $((w - f))
+        printf '  %s%s%s%s%s\n' "$BAR_ON" "$on" "$BAR_OFF" "$REPLY" "$R"
     else
         rule
     fi
@@ -279,30 +452,51 @@ typewrite() {
     fi
 }
 
-spin_run() {
-    local label=$1
+# ── Background jobs ──
+# Slow lookups (public IP, newest release...) start early and are collected when needed.
+bg_start() {
+    local name=$1
     shift
-    local tmp rc
-    tmp=$(mktemp)
+    BG_STARTED[$name]=1
+    rm -f "$BG_DIR/$name.rc"
+    {
+        "$@" >"$BG_DIR/$name.out"
+        echo $? >"$BG_DIR/$name.rc.tmp"
+        mv -f "$BG_DIR/$name.rc.tmp" "$BG_DIR/$name.rc"
+    } 2>/dev/null &
+}
+bg_ensure() {
+    [[ -n ${BG_STARTED[$1]:-} ]] && return 0
+    bg_start "$@"
+}
+# bg_wait NAME LABEL - shows a spinner until the job is done. Output -> SPIN_OUT, returns its exit code.
+bg_wait() {
+    local name=$1 label=$2 i=0 rc=1 waited=0
     ((${#label} > COLS - 8)) && label="${label:0:$((COLS - 11))}$I_ELL"
-    if $ANIM; then
-        "$@" >"$tmp" 2>/dev/null &
-        local pid=$! i=0
-        printf '\e[?25l'
-        while kill -0 "$pid" 2>/dev/null; do
-            printf '\r\e[K  %s%s%s %s%s%s' "$ACC2" "${SPIN_FRAMES[i % ${#SPIN_FRAMES[@]}]}" "$R" "$GRY" "$label" "$R"
+    if [[ ! -e $BG_DIR/$name.rc ]]; then
+        $ANIM && printf '\e[?25l'
+        while [[ ! -e $BG_DIR/$name.rc ]] && ((waited < 1500)); do
+            $ANIM && printf '\r\e[K  %s%s%s %s%s%s' "$ACC2" "${SPIN_FRAMES[i % ${#SPIN_FRAMES[@]}]}" "$R" "$GRY" "$label" "$R"
             i=$((i + 1))
+            waited=$((waited + 1))
             sleep 0.08
         done
-        printf '\r\e[K\e[?25h'
-        wait "$pid"
-    else
-        "$@" >"$tmp" 2>/dev/null
+        $ANIM && printf '\r\e[K\e[?25h'
     fi
-    rc=$?
-    SPIN_OUT=$(<"$tmp")
-    rm -f "$tmp"
+    SPIN_OUT=''
+    [[ -e $BG_DIR/$name.rc ]] || return 1
+    read -r rc <"$BG_DIR/$name.rc" || rc=1
+    [[ -f $BG_DIR/$name.out ]] && SPIN_OUT=$(<"$BG_DIR/$name.out")
+    [[ $rc =~ ^[0-9]+$ ]] || rc=1
     return "$rc"
+}
+spin_run() {
+    local label=$1 name
+    shift
+    SPIN_SEQ=$((SPIN_SEQ + 1))
+    name="spin-$BASHPID-$SPIN_SEQ"
+    bg_start "$name" "$@"
+    bg_wait "$name" "$label"
 }
 
 celebrate() {
@@ -326,7 +520,9 @@ celebrate() {
 
 # ── Questions ──
 die_input() {
+    echo_on
     printf '%s' "$R"
+    $KEYS && printf '\e[?25h'
     echo
     die "Input closed - stopping. Nothing after this point was changed."
 }
@@ -338,50 +534,179 @@ trim() {
     printf '%s' "$s"
 }
 
+# Going back. Inside a wizard step (which runs in a subshell, see run_step) "back" means:
+# restart this step if something was already answered in it, otherwise return to the previous step.
+can_back() { $IN_STEP && { ((Q_COUNT > 0)) || $HAS_PREV; }; }
+go_back() {
+    can_back || return 1
+    echo_on
+    printf '%s' "$R"
+    $KEYS && printf '\e[?25h'
+    if ((Q_COUNT > 0)); then
+        dump_answers >&5
+        exit 45
+    fi
+    exit 43
+}
+dump_answers() {
+    local v
+    for v in "${ANSWER_VARS[@]}"; do printf '%s=%q\n' "$v" "${!v}"; done
+}
+answered() { Q_COUNT=$((Q_COUNT + 1)); }
+
+# Reads one key press -> KEY (a name like up/enter/esc, or the typed character).
+read_key() {
+    local c s
+    KEY=''
+    IFS= read -rsn1 c <"$TTY" || die_input
+    case $c in
+    '' | $'\r') KEY=enter ;;
+    $'\x7f' | $'\b') KEY=bs ;;
+    $'\t') KEY=tab ;;
+    $'\x01') KEY=home ;;
+    $'\x05') KEY=end ;;
+    $'\x15') KEY=kill ;;
+    $'\x17') KEY=word ;;
+    $'\e')
+        if IFS= read -rsn1 -t 0.1 c <"$TTY"; then
+            KEY=other
+            if [[ $c == '[' || $c == O ]]; then
+                s=$c
+                while IFS= read -rsn1 -t 0.1 c <"$TTY"; do
+                    s+=$c
+                    [[ $c =~ [[:alpha:]~] ]] && break
+                done
+                case $s in
+                '[1~' | '[7~' | *H) KEY=home ;;
+                '[4~' | '[8~' | *F) KEY=end ;;
+                '[3~') KEY=del ;;
+                *A) KEY=up ;;
+                *B) KEY=down ;;
+                *C) KEY=right ;;
+                *D) KEY=left ;;
+                esac
+            fi
+        else
+            KEY=esc
+        fi
+        ;;
+    [[:cntrl:]]) KEY=other ;;
+    *) KEY=$c ;;
+    esac
+    return 0
+}
+
 prompt_line() {
     local q=$1 d=$2 h=''
-    [[ -n ${3:-} ]] && h=" ${GRY}(?)${R}"
+    PROMPT_LEN=$((4 + ${#q} + 2))
+    if [[ -n ${3:-} ]]; then
+        h=" ${GRY}(?)${R}"
+        PROMPT_LEN=$((PROMPT_LEN + 4))
+    fi
     printf '  %s%s%s %s%s%s%s' "$ACC" "$I_ARROW" "$R" "$B" "$q" "$R" "$h"
-    [[ -n $d ]] && printf ' %s[%s]%s' "$GRY" "$d" "$R"
+    if [[ -n $d ]]; then
+        vlen "$d"
+        PROMPT_LEN=$((PROMPT_LEN + REPLY + 3))
+        printf ' %s[%s]%s' "$GRY" "$d" "$R"
+    fi
     printf ': %s' "$ACC2"
 }
 
-read_line() {
-    local __l
-    IFS= read -r __l <"$TTY" || die_input
-    printf '%s' "$R"
-    printf -v "$1" '%s' "$__l"
+# A small line editor: arrows/Home/End move, Backspace/Delete/Ctrl+U/Ctrl+W erase, long input scrolls
+# sideways instead of wrapping. Returns 1 when Esc was pressed.
+edit_line() {
+    local __var=$1 col=$2 secret=${3:-false} buf='' cur=0 off=0 avail vis pre n back
+    avail=$((TERM_COLS - col - 1))
+    ((avail < 8)) && avail=8
+    echo_off
+    printf '%s' "$ACC2"
+    while true; do
+        read_key
+        case $KEY in
+        enter) break ;;
+        esc)
+            echo_on
+            printf '%s\n' "$R"
+            return 1
+            ;;
+        bs)
+            ((cur > 0)) || continue
+            buf=${buf:0:cur-1}${buf:cur}
+            cur=$((cur - 1))
+            ;;
+        del) buf=${buf:0:cur}${buf:cur+1} ;;
+        left) ((cur > 0)) && cur=$((cur - 1)) ;;
+        right) ((cur < ${#buf})) && cur=$((cur + 1)) ;;
+        home) cur=0 ;;
+        end) cur=${#buf} ;;
+        kill)
+            buf=''
+            cur=0
+            ;;
+        word)
+            pre=${buf:0:cur}
+            while [[ $pre == *' ' ]]; do pre=${pre% }; done
+            while [[ -n $pre && $pre != *' ' ]]; do pre=${pre%?}; done
+            buf=$pre${buf:cur}
+            cur=${#pre}
+            ;;
+        up | down | tab | other | '') continue ;;
+        *)
+            if [[ $KEY == '?' && -z $buf ]] && ! $secret; then
+                buf='?'
+                printf '?'
+                break
+            fi
+            buf=${buf:0:cur}$KEY${buf:cur}
+            cur=$((cur + 1))
+            if ((cur == ${#buf} && cur - off <= avail)); then
+                if $secret; then printf '%s' "$I_BUL"; else printf '%s' "$KEY"; fi
+                continue
+            fi
+            ;;
+        esac
+        ((off > 0 && ${#buf} - off < avail)) && off=$((${#buf} > avail ? ${#buf} - avail : 0))
+        ((cur < off)) && off=$cur
+        ((cur - off > avail)) && off=$((cur - avail))
+        n=$((${#buf} - off))
+        ((n > avail)) && n=$avail
+        if $secret; then
+            rep "$I_BUL" "$n"
+            vis=$REPLY
+        else vis=${buf:off:n}; fi
+        printf '\r\e[%dC\e[K%s%s' "$col" "$ACC2" "$vis"
+        back=$((n - (cur - off)))
+        ((back > 0)) && printf '\e[%dD' "$back"
+    done
+    echo_on
+    printf '%s\n' "$R"
+    printf -v "$__var" '%s' "$buf"
+    return 0
 }
 
-read_secret() {
-    local __s='' __c
-    if [[ $TTY == /dev/tty ]]; then
-        stty -echo <"$TTY" 2>/dev/null
-        while true; do
-            IFS= read -rsn1 __c <"$TTY" || {
-                stty echo <"$TTY" 2>/dev/null
-                die_input
-            }
-            case $__c in
-            '') break ;;
-            $'\x7f' | $'\b') if [[ -n $__s ]]; then
-                __s=${__s%?}
-                printf '\b \b'
-            fi ;;
-            $'\e') IFS= read -rsn2 -t 0.02 __c <"$TTY" || true ;;
-            $'\x04') ;;
-            *)
-                __s+=$__c
-                printf '%s' "$I_BUL"
-                ;;
-            esac
-        done
-        stty echo <"$TTY" 2>/dev/null
-    else
-        IFS= read -rs __s <"$TTY" || die_input
+# read_input VAR [secret] - reads an answer after prompt_line. Returns 1 if the user asked to go back.
+read_input() {
+    local __l='' __col
+    if $KEYS; then
+        __col=$PROMPT_LEN
+        if ((__col > TERM_COLS - 24)); then
+            printf '\n      '
+            __col=6
+        fi
+        edit_line "$1" "$__col" "${2:-false}"
+        return
     fi
-    printf '%s\n' "$R"
-    printf -v "$1" '%s' "$__s"
+    if [[ ${2:-false} == true ]]; then
+        IFS= read -rs __l <"$TTY" || die_input
+        printf '%s\n' "$R"
+    else
+        IFS= read -r __l <"$TTY" || die_input
+        printf '%s' "$R"
+        __l=${__l%$'\r'}
+        [[ $__l == '<' ]] && return 1
+    fi
+    printf -v "$1" '%s' "$__l"
+    return 0
 }
 
 show_help() {
@@ -393,7 +718,10 @@ ask() {
     HELP=''
     while true; do
         prompt_line "$prompt" "$def" "$help"
-        read_line ans
+        read_input ans || {
+            go_back
+            continue
+        }
         ans=$(trim "$ans")
         if [[ $ans == '?' ]]; then
             show_help "$help"
@@ -409,6 +737,7 @@ ask() {
             continue
         fi
         printf -v "$__var" '%s' "$ans"
+        answered
         return 0
     done
 }
@@ -419,13 +748,17 @@ ask_opt() {
     shown=${def:-optional - Enter to skip}
     while true; do
         prompt_line "$prompt" "$shown" "$help"
-        read_line ans
+        read_input ans || {
+            go_back
+            continue
+        }
         ans=$(trim "$ans")
         if [[ $ans == '?' ]]; then
             show_help "$help"
             continue
         fi
         printf -v "$__var" '%s' "${ans:-$def}"
+        answered
         return 0
     done
 }
@@ -433,10 +766,61 @@ ask_opt() {
 ask_yn() {
     local q=$1 def=${2:-Y} ans opts help=$HELP
     HELP=''
+    if $KEYS; then
+        local sel=0 i a b legend=''
+        [[ $def == Y ]] || sel=1
+        ((TERM_COLS >= 64)) && legend="    ${GRY}${K_SIDE} change${L_SEP}Enter confirm${R}"
+        while true; do
+            wrap "$q" $((COLS - 10))
+            for i in "${!WRAPPED[@]}"; do
+                if ((i == 0)); then
+                    printf '  %s%s%s %s%s%s' "$ACC" "$I_ARROW" "$R" "$B" "${WRAPPED[i]}" "$R"
+                else
+                    printf '\n    %s%s%s' "$B" "${WRAPPED[i]}" "$R"
+                fi
+            done
+            [[ -n $help ]] && printf ' %s(?)%s' "$GRY" "$R"
+            printf '\n'
+            echo_off
+            printf '\e[?25l'
+            while true; do
+                if ((sel == 0)); then
+                    a="${ACC}${B}${I_RON} Yes${R}" b="${GRY}${I_ROFF} No${R}"
+                else
+                    a="${GRY}${I_ROFF} Yes${R}" b="${ACC}${B}${I_RON} No${R}"
+                fi
+                printf '\r\e[K      %s   %s%s' "$a" "$b" "$legend"
+                read_key
+                case $KEY in
+                left | right | up | down | tab | [aAdDwWsShHlLjJkK]) sel=$((1 - sel)) ;;
+                y | Y) sel=0 ;;
+                n | N) sel=1 ;;
+                enter | ' ') break 2 ;;
+                '?')
+                    printf '\r\e[K\e[?25h'
+                    echo_on
+                    show_help "$help"
+                    continue 2
+                    ;;
+                esc | bs)
+                    printf '\r\e[K'
+                    go_back
+                    ;;
+                esac
+            done
+        done
+        printf '\r\e[K      %s%s%s\n\e[?25h' "$ACC2" "$( ((sel == 0)) && echo Yes || echo No)" "$R"
+        echo_on
+        answered
+        return "$sel"
+    fi
     if [[ $def == Y ]]; then opts="${B}Y${R}${GRY}/n"; else opts="y/${B}N${R}${GRY}"; fi
     while true; do
         prompt_line "$q" "$opts" "$help"
-        read_line ans
+        read_input ans || {
+            go_back
+            continue
+        }
         ans=$(trim "$ans")
         if [[ $ans == '?' ]]; then
             show_help "$help"
@@ -444,75 +828,169 @@ ask_yn() {
         fi
         ans=${ans:-$def}
         case ${ans,,} in
-        y | yes) return 0 ;;
-        n | no) return 1 ;;
+        y | yes)
+            answered
+            return 0
+            ;;
+        n | no)
+            answered
+            return 1
+            ;;
         esac
         err "Please answer y (yes) or n (no)."
     done
 }
 
+# choose VAR DEFAULT_KEY "key|Label|Hint"...
+# With a real terminal: arrow keys / W S / J K move, 1-9 jump, Enter selects, ? shows help, Esc goes back.
+# Otherwise: type the number and press Enter.
 choose() {
     local __var=$1 def=$2
     shift 2
-    local i=1 defidx=1 opt key label hnt ans help=$HELP
-    local -a keys=()
+    local i=0 sel=0 opt key label hnt ans help=$HELP l on off h n total=0 first legend out
+    local -a keys=() b_on=() b_off=()
     HELP=''
     for opt in "$@"; do
         IFS='|' read -r key label hnt <<<"$opt"
         keys+=("$key")
-        [[ $key == "$def" ]] && defidx=$i
+        [[ $key == "$def" ]] && sel=$i
+        on='' off='' h=0
+        wrap "$label" $((COLS - 10))
+        for l in "${WRAPPED[@]}"; do
+            if ((h == 0)); then
+                on+="  ${ACC}${B}${I_ARROW} $((i + 1))${R}  ${B}${l}${R}"$'\n'
+                off+="    ${ACC}$((i + 1))${R}  ${l}"$'\n'
+            else
+                on+="       ${B}${l}${R}"$'\n'
+                off+="       ${l}"$'\n'
+            fi
+            h=$((h + 1))
+        done
+        if [[ -n $hnt ]]; then
+            wrap "$hnt" $((COLS - 12))
+            for l in "${WRAPPED[@]}"; do
+                on+="       ${GRY}${l}${R}"$'\n'
+                off+="       ${GRY}${l}${R}"$'\n'
+                h=$((h + 1))
+            done
+        fi
+        b_on+=("$on")
+        b_off+=("$off")
+        total=$((total + h))
         i=$((i + 1))
     done
-    i=1
-    for opt in "$@"; do
-        IFS='|' read -r key label hnt <<<"$opt"
-        if ((i == defidx)); then
-            printf '    %s%s%d%s  %s%s%s %s(default)%s\n' "$B" "$ACC" "$i" "$R" "$B" "$label" "$R" "$GRY" "$R"
-        else
-            printf '    %s%d%s  %s\n' "$ACC" "$i" "$R" "$label"
-        fi
-        [[ -n $hnt ]] && printf '%s\n' "$hnt" | fold -s -w "$((COLS - 12))" | sed "s/^/       ${GRY}/; s/\$/${R}/"
-        i=$((i + 1))
+    n=${#keys[@]}
+
+    if $KEYS && ((total + 2 < TERM_ROWS)); then
+        legend="${K_MOVE} move${L_SEP}Enter select"
+        [[ -n $help ]] && legend+="${L_SEP}? help"
+        can_back && legend+="${L_SEP}Esc back"
+        first=true
+        echo_off
+        printf '\e[?25l'
+        while true; do
+            out=''
+            for ((i = 0; i < n; i++)); do
+                if ((i == sel)); then out+=${b_on[i]}; else out+=${b_off[i]}; fi
+            done
+            $first || printf '\e[%dA\r\e[J' "$total"
+            first=false
+            printf '%s  %s%s%s' "$out" "$GRY" "$legend" "$R"
+            read_key
+            case $KEY in
+            up | w | W | k | K) sel=$(((sel + n - 1) % n)) ;;
+            down | s | S | j | J | tab) sel=$(((sel + 1) % n)) ;;
+            home) sel=0 ;;
+            end) sel=$((n - 1)) ;;
+            [1-9]) ((KEY <= n)) && sel=$((KEY - 1)) ;;
+            enter | ' ' | right | d | D | l | L) break ;;
+            '?')
+                printf '\e[%dA\r\e[J\e[?25h' "$total"
+                echo_on
+                show_help "$help"
+                echo_off
+                printf '\e[?25l'
+                first=true
+                ;;
+            esc | left | a | A | h | H | bs)
+                if can_back; then
+                    printf '\r\e[K'
+                    go_back
+                fi
+                ;;
+            esac
+        done
+        printf '\r\e[K\e[?25h'
+        echo_on
+        printf -v "$__var" '%s' "${keys[sel]}"
+        answered
+        return 0
+    fi
+
+    for ((i = 0; i < n; i++)); do
+        if ((i == sel)); then printf '%s' "${b_on[i]}"; else printf '%s' "${b_off[i]}"; fi
     done
     while true; do
-        prompt_line "Your choice" "$defidx" "$help"
-        read_line ans
+        prompt_line "Your choice" "$((sel + 1))" "$help"
+        read_input ans || {
+            go_back
+            continue
+        }
         ans=$(trim "$ans")
         if [[ $ans == '?' ]]; then
             show_help "$help"
             continue
         fi
-        ans=${ans:-$defidx}
-        if [[ $ans =~ ^[0-9]+$ ]] && ((ans >= 1 && ans <= ${#keys[@]})); then
-            printf -v "$__var" '%s' "${keys[ans - 1]}"
+        ans=${ans:-$((sel + 1))}
+        if [[ $ans =~ ^[0-9]+$ ]] && ((10#$ans >= 1 && 10#$ans <= n)); then
+            printf -v "$__var" '%s' "${keys[10#$ans - 1]}"
+            answered
             return 0
         fi
         for key in "${keys[@]}"; do
             if [[ ${ans,,} == "$key" ]]; then
                 printf -v "$__var" '%s' "$key"
+                answered
                 return 0
             fi
         done
-        err "Type a number from 1 to ${#keys[@]}."
+        err "Type a number from 1 to $n."
     done
 }
 
+# ask_password VAR PROMPT CAN_GENERATE VALIDATOR MESSAGE
+# If VAR already holds a password (going back, or editing from the review screen), Enter keeps it.
 ask_password() {
-    local __var=$1 prompt=$2 gen=$3 val=$4 msg=$5 p1 p2 help=$HELP def=''
+    local __var=$1 prompt=$2 gen=$3 val=$4 msg=$5 p1 p2 help=$HELP def='' old=${!1}
     HELP=''
     PW_WAS_GENERATED=false
-    [[ $gen == true ]] && def="Enter = generate one for me"
+    PW_KEPT=false
+    if [[ -n $old ]]; then
+        def="Enter = keep the current one"
+    elif [[ $gen == true ]]; then
+        def="Enter = generate one for me"
+    fi
     while true; do
         prompt_line "$prompt" "$def" "$help"
-        read_secret p1
+        read_input p1 true || {
+            go_back
+            continue
+        }
         if [[ $p1 == '?' ]]; then
             show_help "$help"
             continue
+        fi
+        if [[ -z $p1 && -n $old ]]; then
+            PW_KEPT=true
+            ok "Keeping the password you already chose."
+            answered
+            return 0
         fi
         if [[ -z $p1 && $gen == true ]]; then
             printf -v "$__var" '%s' "$(gen_password)"
             PW_WAS_GENERATED=true
             ok "A strong password was generated - you'll see it at the end."
+            answered
             return 0
         fi
         if ! "$val" "$p1"; then
@@ -520,13 +998,14 @@ ask_password() {
             continue
         fi
         prompt_line "Type it again" "" ""
-        read_secret p2
+        read_input p2 true || continue
         if [[ $p1 != "$p2" ]]; then
             err "The two entries didn't match - let's try again."
             continue
         fi
         printf -v "$__var" '%s' "$p1"
         ok "Password set."
+        answered
         return 0
     done
 }
@@ -546,7 +1025,10 @@ ask_tz() {
     HELP=''
     while true; do
         prompt_line "Timezone" "$def" "$help"
-        read_line ans
+        read_input ans || {
+            go_back
+            continue
+        }
         ans=$(trim "$ans")
         if [[ $ans == '?' ]]; then
             show_help "$help"
@@ -555,12 +1037,14 @@ ask_tz() {
         ans=${ans:-$def}
         if is_tz "$ans"; then
             printf -v "$__var" '%s' "$ans"
+            answered
             return 0
         fi
         mapfile -t m < <(tz_search "$ans")
         if ((${#m[@]} == 1)); then
             ok "Found it: ${m[0]}"
             printf -v "$__var" '%s' "${m[0]}"
+            answered
             return 0
         elif ((${#m[@]} > 1)); then
             warn "A few timezones match \"$ans\" - type the one you mean:"
@@ -571,11 +1055,27 @@ ask_tz() {
     done
 }
 
+# pause [TEXT] [EXTRA_KEYS] - waits for Enter. A key listed in EXTRA_KEYS also returns (it lands in PAUSE_KEY).
 pause() {
     local x
+    PAUSE_KEY=''
     printf '\n  %s%s %s%s' "$GRY" "$I_ENTER" "${1:-Press Enter to continue}" "$R"
-    read_line x
-    : "$x"
+    if $KEYS; then
+        echo_off
+        while true; do
+            read_key
+            [[ $KEY == enter || $KEY == ' ' ]] && break
+            if [[ -n ${2:-} && ${#KEY} -eq 1 && $2 == *"$KEY"* ]]; then
+                PAUSE_KEY=$KEY
+                break
+            fi
+        done
+        echo_on
+        printf '\n'
+    else
+        IFS= read -r x <"$TTY" || die_input
+        : "$x"
+    fi
 }
 
 gen_password() {
@@ -616,17 +1116,56 @@ is_port_range() {
 is_smtp_enc() { [[ $1 == tls || $1 == ssl || $1 == none ]]; }
 
 # ── System facts ──
-fetch_public_ip() { curl -4 -fsS --max-time 5 https://ipv4.icanhazip.com | tr -d '[:space:]'; }
+fetch_public_ip() {
+    local ip url
+    for url in https://ipv4.icanhazip.com https://api.ipify.org https://checkip.amazonaws.com; do
+        ip=$(curl -4 -fsS --max-time 5 "$url" 2>/dev/null | tr -d '[:space:]')
+        if is_ipv4 "${ip:-x}"; then
+            printf '%s' "$ip"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Versions of the PHP packages in the repos, e.g. "php=8.5.1-1" (one per line).
+repo_info() {
+    LC_ALL=C pacman -Si php php-legacy valkey 2>/dev/null |
+        awk '$1 == "Name" {n = $3} $1 == "Version" {print n "=" $3}'
+    return 0
+}
+
+# Start the slow network lookups in the background so they're ready when needed.
+prefetch() {
+    bg_ensure pubip fetch_public_ip
+    bg_ensure net curl -fsS --max-time 10 -o /dev/null https://github.com
+    bg_ensure repo repo_info
+    [[ -z ${PANEL_VERSION_OVERRIDE:-} ]] && bg_ensure panelver latest_panel_version
+    return 0
+}
 
 detect_facts() {
+    prefetch
     TOTAL_MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
     FREE_DISK_MB=$(df -Pm /var/lib 2>/dev/null | awk 'NR==2 {print $4}' || echo 0)
     FREE_ROOT_MB=$(df -Pm / 2>/dev/null | awk 'NR==2 {print $4}' || echo 0)
     PRIMARY_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')
     LOCAL_IPS=$(ip -4 -o addr show scope global 2>/dev/null | awk '{split($4,a,"/"); print a[1]}' | sort -u | tr '\n' ' ')
     PUBLIC_IP=''
-    spin_run "Looking up this machine's public IP address" fetch_public_ip && PUBLIC_IP=$SPIN_OUT
+    bg_wait pubip "Looking up this machine's public IP address" && PUBLIC_IP=$SPIN_OUT
     is_ipv4 "${PUBLIC_IP:-x}" || PUBLIC_IP=''
+    local line
+    bg_wait repo "Reading the package database" || true
+    while IFS= read -r line; do
+        case $line in
+        php=*) [[ ${line#*=} =~ ^([0-9]+:)?([0-9]+\.[0-9]+) ]] && PHP_CUR_VER=${BASH_REMATCH[2]} ;;
+        php-legacy=*)
+            [[ ${line#*=} =~ ^([0-9]+:)?([0-9]+\.[0-9]+) ]] && PHP_LEG_VER=${BASH_REMATCH[2]}
+            REPO_HAS_LEGACY=yes
+            ;;
+        esac
+    done <<<"$SPIN_OUT"
+    [[ -n $PHP_CUR_VER && $REPO_HAS_LEGACY != yes ]] && REPO_HAS_LEGACY=no
     SYSTEM_TZ=$(timedatectl show -p Timezone --value 2>/dev/null || true)
     [[ -z $SYSTEM_TZ ]] && SYSTEM_TZ=$(readlink /etc/localtime 2>/dev/null | sed 's#.*/zoneinfo/##')
     is_tz "${SYSTEM_TZ:-x}" || SYSTEM_TZ=UTC
@@ -640,6 +1179,11 @@ detect_facts() {
     if [[ -z $SSH_DETECTED ]]; then
         SSH_DETECTED=$(ss -Htlnp 2>/dev/null | awk '/"sshd"/ {n=split($4,a,":"); print a[n]; exit}')
     fi
+    if [[ -z $SSH_DETECTED ]] && command -v sshd >/dev/null 2>&1; then
+        # Socket-activated sshd doesn't show up as "sshd" in ss - ask its configuration instead.
+        SSH_DETECTED=$(sshd -T 2>/dev/null | awk '$1 == "port" {print $2; exit}')
+    fi
+    is_port "${SSH_DETECTED:-x}" || SSH_DETECTED=''
     KERNEL_PENDING_REBOOT=false
     [[ -d /usr/lib/modules/$(uname -r) ]] || KERNEL_PENDING_REBOOT=true
 }
@@ -655,6 +1199,35 @@ latest_panel_version() {
     url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' --max-time 15 https://github.com/pterodactyl/panel/releases/latest 2>/dev/null || true)
     tag=${url##*/}
     [[ $tag =~ ^v1\.[0-9]+\.[0-9]+$ ]] && printf '%s' "$tag"
+}
+
+php_label() {
+    if [[ $1 == current ]]; then
+        printf 'php (PHP %s)' "${PHP_CUR_VER:-newest}"
+    else
+        printf 'php-legacy (PHP %s)' "${PHP_LEG_VER:-8.3}"
+    fi
+}
+
+# verify_sha256 FILE CHECKSUMS_URL NAME - checks FILE against the project's published checksum list.
+# A mismatch fails; a missing list or entry is only noted (older releases don't publish one).
+verify_sha256() {
+    local sums want got
+    if ! sums=$(curl -fsSL --retry 2 --max-time 30 "$2"); then
+        echo "No checksum list at $2 - can't verify $3."
+        return 0
+    fi
+    want=$(awk -v n="$3" '{f = $2; sub(/^[*.\/]+/, "", f)} f == n {print $1; exit}' <<<"$sums")
+    if [[ ! $want =~ ^[0-9a-fA-F]{64}$ ]]; then
+        echo "The checksum list has no entry for $3 - can't verify it."
+        return 0
+    fi
+    got=$(sha256sum "$1" | awk '{print $1}')
+    if [[ ${got,,} != "${want,,}" ]]; then
+        echo "Checksum mismatch for $3: expected $want, got $got. The download is damaged or was tampered with."
+        return 1
+    fi
+    echo "Checksum OK: $3"
 }
 
 has_panel() { [[ $MODE == full || $MODE == panel ]]; }
@@ -714,22 +1287,44 @@ runtime_set() { (
     umask 077
     printf '%s=%q\n' "$1" "$2" >>"$RUNTIME_FILE"
 ); }
-is_done() { [[ -f $DONE_FILE ]] && grep -qx "$1" "$DONE_FILE"; }
+is_done() { [[ -f $DONE_FILE ]] && grep -qxF -- "$1" "$DONE_FILE"; }
 mark_done() { echo "$1" >>"$DONE_FILE"; }
 
 # ── Wizard ──
 STEP_N=0
 STEP_TOTAL=0
 next_step() {
-    STEP_N=$((STEP_N + 1))
-    if ((STEP_TOTAL > 0)); then
-        header "$1" "Step $STEP_N of $STEP_TOTAL" "$STEP_N" "$STEP_TOTAL"
-    elif ((STEP_TOTAL < 0)); then
+    Q_COUNT=0
+    if $EDITING; then
         header "$1" "Editing"
+    elif ((STEP_TOTAL > 0)); then
+        header "$1" "Step $STEP_N of $STEP_TOTAL" "$STEP_N" "$STEP_TOTAL"
     else header "$1" "Step $STEP_N"; fi
 }
 
 wz_welcome() {
+    prefetch
+    local anim=$ANIM
+    while true; do
+        welcome_screen
+        ANIM=false
+        if $KEYS && $UTF8_LOCALE; then
+            pause "Press Enter to check this machine" "sS"
+        else
+            pause "Press Enter to check this machine"
+        fi
+        [[ -n $PAUSE_KEY ]] || break
+        cycle_symbols
+    done
+    ANIM=$anim
+
+    header "Checking this machine" "Getting ready"
+    detect_facts
+    preflight
+}
+
+welcome_screen() {
+    measure
     cls
     blank
     show_logo
@@ -744,23 +1339,36 @@ wz_welcome() {
     kv "Wings" "the helper that actually runs your game servers"
     blank
     title "How this works"
-    printf '    %s%s1%s  Answer a few questions %s(about 2 minutes)%s\n' "$B" "$ACC" "$R" "$GRY" "$R"
-    printf '    %s%s2%s  Check your answers on a review screen %s(nothing changes before that)%s\n' "$B" "$ACC" "$R" "$GRY" "$R"
-    printf '    %s%s3%s  Sit back while PteroArch installs everything %s(5-15 minutes)%s\n' "$B" "$ACC" "$R" "$GRY" "$R"
+    local n1=" (about 2 minutes)" n2=" (nothing changes before that)" n3=" (5-15 minutes)"
+    ((COLS < 76)) && n1='' n2='' n3=''
+    printf '    %s%s1%s  Answer a few questions%s%s%s\n' "$B" "$ACC" "$R" "$GRY" "$n1" "$R"
+    printf '    %s%s2%s  Check your answers on a review screen%s%s%s\n' "$B" "$ACC" "$R" "$GRY" "$n2" "$R"
+    printf '    %s%s3%s  Sit back while PteroArch installs everything%s%s%s\n' "$B" "$ACC" "$R" "$GRY" "$n3" "$R"
     blank
-    box "$ACC" "Tips" \
-        "$I_BUL Press Enter to accept the suggestion shown in [brackets]." \
-        "$I_BUL See (?) after a question? Type ? and press Enter for help." \
-        "$I_BUL Press Ctrl+C any time to stop. An interrupted install can be resumed."
+    if $KEYS; then
+        box "$ACC" "Tips" \
+            "$I_BUL Menus: move with the arrow keys (or W/S), confirm with Enter." \
+            "$I_BUL Text questions: Enter accepts the suggestion shown in [brackets]." \
+            "$I_BUL See (?) after a question? Press ? for help." \
+            "$I_BUL Esc goes back. Ctrl+C stops - an interrupted install can be resumed."
+    else
+        box "$ACC" "Tips" \
+            "$I_BUL Press Enter to accept the suggestion shown in [brackets]." \
+            "$I_BUL See (?) after a question? Type ? and press Enter for help." \
+            "$I_BUL Type < and press Enter to go back." \
+            "$I_BUL Ctrl+C stops at any time. An interrupted install can be resumed."
+    fi
+    if $KEYS && $UTF8_LOCALE; then
+        if [[ $SYM == ascii ]]; then
+            dim "Plain symbols are on. Press S to try nicer ones."
+        else
+            dim "Do the symbols on this screen look broken (empty boxes, question marks)? Press S for simpler ones."
+        fi
+    fi
     if $DRY_RUN; then
         blank
         warn "Dry run: you'll see the full plan at the end, but nothing will be installed."
     fi
-    pause "Press Enter to check this machine"
-
-    header "Checking this machine" "Getting ready"
-    detect_facts
-    preflight
 }
 
 PF_FAIL=0
@@ -806,6 +1414,21 @@ preflight() {
     elif [[ " $like " == *" arch "* ]]; then
         pf warn "Arch-based distro detected ($id)" "Written for Arch; derivatives with delayed repos (e.g. Manjaro) may lack php-legacy 8.3 or valkey."
     else pf "$soft" "This is not Arch Linux (${id:-unknown})" "This installer only supports Arch Linux."; fi
+    if [[ $REPO_HAS_LEGACY == no ]]; then
+        pf warn "The package 'php-legacy' isn't in this system's repositories" "Pick Arch's main PHP in the panel settings, or expect the PHP step to fail."
+    fi
+
+    local tool missing=''
+    for tool in curl awk sed grep find sha256sum ss ip getent tar; do
+        command -v "$tool" >/dev/null 2>&1 || missing+=" $tool"
+    done
+    if [[ -n $missing ]]; then
+        if [[ $missing == *" curl"* || $missing == *" awk"* || $missing == *" sed"* ]]; then
+            pf "$soft" "Missing basic tools:$missing" "Install them first, e.g.: pacman -S --needed curl gawk sed grep findutils coreutils iproute2"
+        else
+            pf warn "Missing tools:$missing" "They are installed along the way, but some checks on this screen may be less accurate."
+        fi
+    fi
 
     if [[ -d /run/systemd/system ]]; then pf ok "systemd is running"; else pf "$soft" "systemd is not running" "Containers without systemd (e.g. plain Docker) aren't supported."; fi
 
@@ -813,7 +1436,7 @@ preflight() {
 
     if [[ -e /var/lib/pacman/db.lck ]]; then pf "$soft" "pacman is busy (/var/lib/pacman/db.lck exists)" "Another package install is running. Wait for it to finish, or remove the lock file if nothing is running."; fi
 
-    if spin_run "Checking the internet connection" curl -fsS --max-time 10 -o /dev/null https://github.com; then
+    if bg_wait net "Checking the internet connection"; then
         pf ok "Internet connection works"
     else pf "$soft" "Can't reach github.com" "The panel and Wings are downloaded from GitHub. Check the network / DNS settings."; fi
 
@@ -854,8 +1477,10 @@ preflight() {
 
     PANEL_VERSION=${PANEL_VERSION_OVERRIDE:-}
     if [[ -z $PANEL_VERSION ]]; then
-        spin_run "Finding the newest panel release" latest_panel_version
+        bg_ensure panelver latest_panel_version
+        bg_wait panelver "Finding the newest panel release" || true
         PANEL_VERSION=$SPIN_OUT
+        [[ $PANEL_VERSION =~ ^v1\.[0-9]+\.[0-9]+$ ]] || PANEL_VERSION=''
         if [[ -n $PANEL_VERSION ]]; then
             pf ok "Newest panel release: $PANEL_VERSION"
         else
@@ -896,7 +1521,7 @@ wz_mode() {
             "quit|Quit|"
         [[ $MODE == quit ]] && {
             say "Nothing was changed."
-            exit 0
+            exit 44
         }
     else
         HELP="Not sure? Pick 1. The 'panel' is the website, 'Wings' is the program that runs the game servers. On a single server you want both. Pick 3 only if you already have a panel running on another machine."
@@ -905,11 +1530,6 @@ wz_mode() {
             "panel|Panel only|Run game servers on other machines (install Wings there later with PteroArch)." \
             "wings|Wings only - make this machine a node for an existing panel|You'll need access to the panel's admin area."
     fi
-    case $MODE in
-    full) STEP_TOTAL=6 ;;
-    panel) STEP_TOTAL=5 ;;
-    wings) STEP_TOTAL=3 ;;
-    esac
 }
 
 dns_hint() {
@@ -939,7 +1559,8 @@ wz_address() {
     next_step "How will people reach the panel?"
     say "A domain name (like panel.example.com) is strongly recommended: it lets PteroArch get a free HTTPS certificate, so passwords are sent encrypted."
     blank
-    local kind
+    local kind ssl_def=Y
+    [[ $USE_SSL == false && $PANEL_HOST_IS_IP == false ]] && ssl_def=N
     HELP="A domain is a name like panel.example.com that points to your server's IP address. You create it at your domain provider with an 'A record'. No domain? Pick 2 - it works fine for testing at home, just without encryption."
     choose kind "$([[ $PANEL_HOST_IS_IP == true ]] && echo ip || echo domain)" \
         "domain|I have a domain name pointing at this server|" \
@@ -960,7 +1581,7 @@ wz_address() {
         blank
         say "HTTPS with a free Let's Encrypt certificate needs ports 80 and 443 open to the internet."
         HELP="HTTPS encrypts the connection, so nobody can read passwords on the way. Let's Encrypt certificates are free, and PteroArch sets up automatic renewal. Say yes unless this is just a quick test."
-        if ask_yn "Get a free Let's Encrypt certificate (HTTPS)?" Y; then
+        if ask_yn "Get a free Let's Encrypt certificate (HTTPS)?" "$ssl_def"; then
             USE_SSL=true
             HELP="Let's Encrypt only emails you if a certificate is about to expire and renewing it keeps failing. Any address you read works."
             ask LE_EMAIL "Email for certificate notices" "${LE_EMAIL:-${ADMIN_EMAIL:-}}" is_email "Enter a valid email address, like you@example.com."
@@ -980,9 +1601,11 @@ wz_settings() {
     next_step "Panel settings"
     say "Which PHP should the panel run on? Pterodactyl 1.x is officially tested on PHP 8.2 and 8.3."
     HELP="PHP is the language the panel is written in. Pick 1 unless you know you need Arch's newest PHP for something else on this machine."
-    choose PHP_FLAVOR "${PHP_FLAVOR:-legacy}" \
-        "legacy|php-legacy (PHP 8.3) - recommended|The version the Pterodactyl team tests and uses in its own Docker image." \
-        "current|php (PHP 8.5, Arch's main PHP)|Newer, but not tested by the Pterodactyl team."
+    local php_def=legacy
+    [[ $REPO_HAS_LEGACY == no ]] && php_def=current
+    choose PHP_FLAVOR "${PHP_FLAVOR:-$php_def}" \
+        "legacy|$(php_label legacy) - recommended|The version line the Pterodactyl team tests and uses in its own Docker image." \
+        "current|$(php_label current), Arch's main PHP|Newer, but not tested by the Pterodactyl team."
     set_php_vars
     blank
     say "Timezone for schedules and timestamps. You can type a city, like Warsaw or New York."
@@ -1029,13 +1652,16 @@ wz_admin() {
     say "Password: at least 8 characters, with an uppercase letter and a number. Or just press Enter and PteroArch makes a strong one for you."
     HELP="Leave it empty and press Enter to get a strong random password. It's shown at the end and saved in $CRED_FILE (only root can read it)."
     ask_password ADMIN_PASSWORD "Password" true is_password "Needs 8+ characters, including an uppercase letter and a number."
-    ADMIN_PASSWORD_GENERATED=$PW_WAS_GENERATED
+    $PW_KEPT || ADMIN_PASSWORD_GENERATED=$PW_WAS_GENERATED
     [[ -z $LE_EMAIL ]] && LE_EMAIL=$ADMIN_EMAIL
     return 0
 }
 
 wz_node() {
     next_step "Game server node (Wings on this machine)"
+    # Seen this step before and declined the port range? Then suggest "no" again.
+    local range_def=Y
+    [[ -n $NODE_MEMORY && -z $ALLOC_RANGE ]] && range_def=N
     say "PteroArch will register this machine in the panel as a 'node' (a machine that runs game servers), configure Wings, and start it."
     blank
     HELP="Just a label you'll see in the panel. The machine's hostname is a good choice."
@@ -1056,7 +1682,7 @@ wz_node() {
     blank
     say "Each game server needs its own network port (an 'allocation'). PteroArch can add a range of them now."
     HELP="Minecraft uses port 25565 by default, so 25565-25600 gives you 36 ports to hand out to game servers. Up to 1000 ports, all above 1024."
-    if ask_yn "Add a port range now?" Y; then
+    if ask_yn "Add a port range now?" "$range_def"; then
         HELP="Format: FROM-TO, for example 25565-25600. Up to 1000 ports, all above 1024."
         ask ALLOC_RANGE "Port range" "${ALLOC_RANGE:-25565-25600}" is_port_range "Use FROM-TO, e.g. 25565-25600 (above 1024, at most 1000 ports)."
         HELP="The address game servers listen on. Use this machine's own address (the suggestion). Behind a home router that's the local address, like 192.168.1.20."
@@ -1092,7 +1718,8 @@ wz_wings_remote() {
         "2. Admin > Nodes > Create New - use this machine's domain as the FQDN, and pick 'Use SSL Connection' if your panel uses HTTPS"
     blank
     HELP="The address the panel and your players' browsers use to reach this machine. Enter exactly what you put in the node's FQDN field in the panel."
-    ask W_FQDN "This node's domain (or IP if the node doesn't use SSL)" "${W_FQDN:-${PUBLIC_IP:-$PRIMARY_IP}}" \
+    say "Enter this node's domain - or its IP address if the node doesn't use SSL."
+    ask W_FQDN "Node address" "${W_FQDN:-${PUBLIC_IP:-$PRIMARY_IP}}" \
         is_node_host "Enter a domain like node1.example.com, or an IPv4 address."
     W_FQDN=${W_FQDN,,}
     if is_fqdn "$W_FQDN"; then
@@ -1124,11 +1751,21 @@ wz_wings_remote() {
     blank
     case $W_CONFIG_METHOD in
     deploy)
-        local line
+        local line keep=''
+        is_url "${W_PANEL_URL:-x}" && is_token "${W_TOKEN:-x}" && [[ -n $W_NODE_ID ]] && keep="Enter = keep the one for node #$W_NODE_ID"
         while true; do
-            prompt_line "Paste the command" "" ""
-            read_line line
+            prompt_line "Paste the command" "$keep" ""
+            read_input line || {
+                go_back
+                continue
+            }
+            if [[ -z $(trim "$line") && -n $keep ]]; then
+                ok "Keeping the command you pasted earlier."
+                answered
+                break
+            fi
             if parse_deploy_cmd "$line"; then
+                answered
                 ok "Got it: panel $W_PANEL_URL, node #$W_NODE_ID"
                 if spin_run "Contacting the panel" curl -fsS --max-time 10 -o /dev/null "$W_PANEL_URL"; then
                     ok "The panel is reachable from here."
@@ -1139,18 +1776,24 @@ wz_wings_remote() {
         done
         ;;
     paste)
-        info "Paste the YAML, then type END on its own line and press Enter:"
-        local text='' l
-        while IFS= read -r l <"$TTY"; do
-            [[ $l == END ]] && break
-            text+="$l"$'\n'
-        done
-        if [[ $text != *"token:"* || $text != *"remote:"* ]]; then
-            warn "That doesn't look like a Wings config (no 'token:' / 'remote:'). You can change it on the review screen."
+        if [[ -n $W_CONFIG_TEXT ]] && ask_yn "Keep the configuration you pasted earlier?" Y; then
+            :
         else
-            ok "Configuration received ($(printf '%s' "$text" | wc -l) lines)."
+            info "Paste the YAML, then type END on its own line and press Enter:"
+            local text='' l
+            while IFS= read -r l <"$TTY"; do
+                l=${l%$'\r'}
+                [[ $(trim "$l") == END ]] && break
+                text+="$l"$'\n'
+            done
+            if [[ $text != *"token:"* || $text != *"remote:"* ]]; then
+                warn "That doesn't look like a Wings config (no 'token:' / 'remote:'). You can change it on the review screen."
+            else
+                ok "Configuration received ($(printf '%s' "$text" | wc -l) lines)."
+            fi
+            W_CONFIG_TEXT=$text
+            answered
         fi
-        W_CONFIG_TEXT=$text
         ;;
     later) ;;
     esac
@@ -1220,28 +1863,75 @@ wz_firewall() {
     fi
 }
 
-wizard_steps() {
-    STEP_N=0
-    wz_mode
+
+step_list() {
+    STEPS=(wz_mode)
     case $MODE in
-    full)
-        wz_address
-        wz_settings
-        wz_admin
-        wz_node
-        wz_firewall
-        ;;
-    panel)
-        wz_address
-        wz_settings
-        wz_admin
-        wz_firewall
-        ;;
-    wings)
-        wz_wings_remote
-        wz_firewall
-        ;;
+    full) STEPS+=(wz_address wz_settings wz_admin wz_node wz_firewall) ;;
+    panel) STEPS+=(wz_address wz_settings wz_admin wz_firewall) ;;
+    wings) STEPS+=(wz_wings_remote wz_firewall) ;;
     esac
+}
+
+step_title() {
+    case $1 in
+    wz_mode) echo "Install type" ;;
+    wz_address) echo "Panel address" ;;
+    wz_settings) echo "Panel settings" ;;
+    wz_admin) echo "Administrator" ;;
+    wz_node | wz_wings_remote) echo "Node" ;;
+    wz_firewall) echo "Firewall" ;;
+    esac
+}
+
+# run_step FN HAS_PREV - runs one wizard step. Returns 0 when it was completed, 1 when the user went back.
+#
+# The step runs in a subshell so "go back" can simply exit from anywhere inside it, however deep in the
+# questions that is. The subshell hands its answers back on fd 5 (the screen stays on fd 4), so a step that
+# is left half-way never changes the answers. Exit codes: 43 = previous step, 44 = quit quietly,
+# 45 = restart this step keeping what was typed so far.
+run_step() {
+    local fn=$1 data rc
+    HAS_PREV=$2
+    while true; do
+        data=$(
+            exec 5>&1 >&4
+            IN_STEP=true
+            Q_COUNT=0
+            "$fn"
+            dump_answers >&5
+        )
+        rc=$?
+        case $rc in
+        0)
+            eval "$data"
+            return 0
+            ;;
+        45) eval "$data" ;;
+        43) return 1 ;;
+        44) exit 0 ;;
+        *) exit "$rc" ;;
+        esac
+    done
+}
+
+# wizard [START] - walks through the steps for the chosen mode, starting at step index START.
+wizard() {
+    local i=${1:-0} prev
+    while true; do
+        step_list
+        ((i >= ${#STEPS[@]})) && break
+        STEP_N=$((i + 1))
+        STEP_TOTAL=${#STEPS[@]}
+        [[ -z $MODE ]] && STEP_TOTAL=0
+        prev=false
+        ((i > 0)) && prev=true
+        if run_step "${STEPS[i]}" "$prev"; then
+            i=$((i + 1))
+        else
+            i=$((i > 0 ? i - 1 : 0))
+        fi
+    done
 }
 
 mask() { [[ -n $1 ]] && echo "$(repeat "$I_BUL" 8) (hidden)" || echo "-"; }
@@ -1254,20 +1944,24 @@ sec() {
 }
 
 review() {
+    local act i n old
+    local -a opts
     while true; do
+        EDITING=false
+        set_php_vars
         header "Review - nothing has been changed yet" "Almost there"
-        say "Here's everything PteroArch will set up. Want to change something? Type its number."
+        say "Here's everything PteroArch will set up. To change something, pick its section in the menu below."
         sec 1 "Install type"
         kv "Components" "$(mode_label)"
         has_panel && kv "Panel release" "$PANEL_VERSION"
         has_wings && kv "Wings release" "latest"
-        local n=2
+        n=2
         if has_panel; then
             sec 2 "Panel address"
             kv "URL" "${ACC2}$(panel_url)${R}"
             kv "HTTPS" "$([[ $USE_SSL == true ]] && echo "Let's Encrypt ($LE_EMAIL)" || echo "no")"
             sec 3 "Panel settings"
-            kv "PHP" "$([[ $PHP_FLAVOR == current ]] && echo "php (8.5)" || echo "php-legacy (8.3)")"
+            kv "PHP" "$(php_label "$PHP_FLAVOR")"
             kv "Timezone" "$TIMEZONE"
             kv "Statistics" "$([[ $TELEMETRY == 1 ]] && echo on || echo off)"
             if [[ $MAIL_SETUP == yes ]]; then kv "Email" "$SMTP_HOST:$SMTP_PORT ($SMTP_ENC), from $MAIL_FROM"; else kv "Email" "not configured"; fi
@@ -1310,14 +2004,20 @@ review() {
         rule
         dim "The install starts with a full system upgrade (pacman -Syu), because Arch doesn't support partial upgrades."
         blank
-        printf '  %s%s Enter%s start installing   %s1-%d%s change a section   %sq%s quit\n' "$GRN$B" "$I_ENTER" "$R" "$ACC$B" "$n" "$R" "$ACC$B" "$R"
-        prompt_line "Your choice" "Enter" ""
-        local ans
-        read_line ans
-        ans=$(trim "$ans")
-        case $ans in
-        '') return 0 ;;
-        q | Q)
+
+        step_list
+        opts=()
+        for i in "${!STEPS[@]}"; do opts+=("s$i|Change: $(step_title "${STEPS[i]}")|"); done
+        if $DRY_RUN; then
+            opts+=("go|Looks good - show the plan (dry run, nothing is installed)|")
+        else
+            opts+=("go|Looks good - start installing|")
+        fi
+        opts+=("quit|Quit without installing|")
+        choose act go "${opts[@]}"
+        case $act in
+        go) return 0 ;;
+        quit)
             blank
             if ask_yn "Quit without installing anything?" N; then
                 blank
@@ -1325,62 +2025,21 @@ review() {
                 exit 0
             fi
             ;;
-        1)
-            local old=$MODE
-            STEP_TOTAL=-1
-            STEP_N=0
-            wz_mode
-            if [[ $MODE != "$old" ]]; then wizard_rest; fi
+        s0)
+            old=$MODE
+            EDITING=true
+            if run_step wz_mode true && [[ $MODE != "$old" ]]; then
+                # A different install type needs different answers: ask for the rest.
+                EDITING=false
+                wizard 1
+            fi
             ;;
-        *)
-            STEP_TOTAL=-1
-            STEP_N=0
-            case "$MODE:$ans" in
-            full:2 | panel:2) wz_address ;;
-            full:3 | panel:3) wz_settings ;;
-            full:4 | panel:4) wz_admin ;;
-            full:5) wz_node ;;
-            full:6 | panel:5) wz_firewall ;;
-            wings:2) wz_wings_remote ;;
-            wings:3) wz_firewall ;;
-            *)
-                err "Type a number from 1 to $n, press Enter, or q."
-                sleep 1
-                ;;
-            esac
+        s*)
+            EDITING=true
+            run_step "${STEPS[${act#s}]}" true || true
             ;;
         esac
     done
-}
-
-wizard_rest() {
-    local total=$STEP_TOTAL
-    case $MODE in
-    full) total=6 ;;
-    panel) total=5 ;;
-    wings) total=3 ;;
-    esac
-    STEP_TOTAL=$total
-    STEP_N=1
-    case $MODE in
-    full)
-        wz_address
-        wz_settings
-        wz_admin
-        wz_node
-        wz_firewall
-        ;;
-    panel)
-        wz_address
-        wz_settings
-        wz_admin
-        wz_firewall
-        ;;
-    wings)
-        wz_wings_remote
-        wz_firewall
-        ;;
-    esac
 }
 
 # ── Task engine ──
@@ -1400,6 +2059,7 @@ build_tasks() {
     TASK_TITLES=()
     TASK_FNS=()
     TASK_EST=()
+    set_php_vars
     add_task packages "Upgrade the system and install packages" t_packages "2-10 min"
     [[ $FW != none ]] && add_task firewall "Configure the firewall ($FW)" t_firewall
     if has_panel; then
@@ -1428,7 +2088,7 @@ build_tasks() {
 
 note() {
     echo ">> $*"
-    printf '%s' "$*" >"$STATUS_FILE" 2>/dev/null || true
+    printf '%s\n' "$*" >"$STATUS_FILE" 2>/dev/null || true
 }
 
 spinner() {
@@ -1437,11 +2097,18 @@ spinner() {
     ((w < 10)) && w=10
     local seg_a=$((w * (idx - 1) / total)) seg_b=$((w * idx / total))
     local el tstr sub frame t avail line1 bar p maxt
+    local done_bar rest_bar
+    rep "$BAR_F" "$seg_a"
+    done_bar=$REPLY
+    rep "$BAR_E" $((w - seg_b))
+    rest_bar=$REPLY
+    echo_off
     printf '\e[?25l'
     while kill -0 "$pid" 2>/dev/null; do
         el=$((SECONDS - t0))
-        tstr=$(fmt_time "$el")
-        sub=$(cat "$STATUS_FILE" 2>/dev/null || true)
+        printf -v tstr '%d:%02d' $((el / 60)) $((el % 60))
+        sub=''
+        [[ -r $STATUS_FILE ]] && IFS= read -r sub <"$STATUS_FILE"
         [[ -z $sub && -n $est ]] && sub="usually $est"
         frame=${SPIN_FRAMES[i % ${#SPIN_FRAMES[@]}]}
         t=$ttl
@@ -1452,11 +2119,11 @@ spinner() {
             sub=''
         elif ((${#sub} > avail)); then sub="${sub:0:$((avail - ${#I_ELL}))}$I_ELL"; fi
         line1="${ACC2}${frame}${R} ${B}${t}${R}  ${GRY}${sub:+$sub $I_DOT }${tstr}${R}"
-        bar="${BAR_ON}$(repeat "$BAR_F" "$seg_a")"
+        bar="${BAR_ON}${done_bar}"
         for ((p = seg_a; p < seg_b; p++)); do
             if ((((p - i % 4 + 4) % 4) < 2)); then bar+="${ACC2}${BAR_F}"; else bar+="${BAR_OFF}${BAR_E}"; fi
         done
-        bar+="${BAR_OFF}$(repeat "$BAR_E" $((w - seg_b)))${R}"
+        bar+="${BAR_OFF}${rest_bar}${R}"
         $drawn && printf '\e[1A'
         printf '\r\e[K  %s\n\r\e[K    %s %s%d/%d%s' "$line1" "$bar" "$GRY" $((idx - 1)) "$total" "$R"
         drawn=true
@@ -1465,6 +2132,8 @@ spinner() {
     done
     $drawn && printf '\r\e[K\e[1A\r\e[K'
     printf '\e[?25h'
+    echo_on
+    flush_input
 }
 
 done_line() {
@@ -1499,14 +2168,16 @@ run_task() {
             printf '  %s%s%s %s%s%s %s(%d/%d%s)%s\n' "$ACC2" "$I_ARROW" "$R" "$B" "$ttl" "$R" "$GRY" "$idx" "$total" "${est:+, usually $est}" "$R"
             (
                 set -Eeuo pipefail
+                umask 022
                 trap 'echo "!! failed (exit $?) at: $BASH_COMMAND" >&2' ERR
                 "$fn"
-            ) 2>&1 | tee -a "$LOG_FILE" |
+            ) 2>&1 </dev/null | tee -a "$LOG_FILE" |
                 { if $VERBOSE; then sed "s/^/    ${GRY}${BX_V} /; s/\$/${R}/"; else cat >/dev/null; fi; }
             rc=${PIPESTATUS[0]}
         else
             (
                 set -Eeuo pipefail
+                umask 022
                 trap 'echo "!! failed (exit $?) at: $BASH_COMMAND" >&2' ERR
                 "$fn"
             ) >>"$LOG_FILE" 2>&1 </dev/null &
@@ -1526,7 +2197,8 @@ run_task() {
         done_line bad "$idx" "$total" "$ttl" "$el"
         blank
         local out
-        out=$(tail -n +"$((start_line + 3))" "$LOG_FILE" | tail -n 12 | cut -c1-$((COLS - 10)))
+        out=$(tail -n +"$((start_line + 3))" "$LOG_FILE" | tail -n 12 | tr -d '\r' | sed $'s/\t/    /g; s/\e\\[[0-9;]*[A-Za-z]//g' | cut -c1-$((COLS - 10)))
+        flush_input
         box "$RED" "This step failed - here's what it printed" "${out:-"(no output)"}"
         local h
         h=$(hint_for "$id")
@@ -1633,7 +2305,7 @@ on_interrupt() {
         pkill -TERM -P "$CHILD_PID" 2>/dev/null
         kill "$CHILD_PID" 2>/dev/null
     fi
-    stty echo <"$TTY" 2>/dev/null
+    echo_on
     printf '%s\e[?25h\n' "$R"
     if [[ -f $ANSWERS_FILE ]]; then
         warn "Stopped. Run PteroArch again to continue where you left off."
@@ -1666,6 +2338,10 @@ t_packages() {
     [[ $MODE == wings && $W_SSL == true ]] && pkgs+=(certbot)
     [[ $FW == ufw ]] && pkgs+=(ufw)
     [[ $FW == firewalld ]] && pkgs+=(firewalld)
+    # An outdated keyring is the classic reason a long-idle Arch box can't upgrade ("signature is unknown
+    # trust"), so refresh it first. The full upgrade follows right away, so this is not a partial upgrade.
+    note "Refreshing the package keyring"
+    pacman -Sy --noconfirm --needed archlinux-keyring || echo "Keyring refresh failed - continuing with the upgrade."
     note "pacman -Syu + ${#pkgs[@]} packages"
     pacman -Syu --noconfirm --needed "${pkgs[@]}"
 }
@@ -1785,7 +2461,11 @@ SQL
 t_valkey() {
     systemctl enable valkey
     systemctl restart valkey
-    sleep 1
+    local i
+    for i in $(seq 1 20); do
+        valkey-cli ping >/dev/null 2>&1 && break
+        sleep 0.5
+    done
     valkey-cli ping
 }
 
@@ -1793,10 +2473,16 @@ t_panel_download() {
     local tmp
     tmp=$(mktemp -d)
     note "Downloading panel.tar.gz"
-    curl -fL --retry 3 -o "$tmp/panel.tar.gz" "https://github.com/pterodactyl/panel/releases/download/${PANEL_VERSION}/panel.tar.gz"
+    local base="https://github.com/pterodactyl/panel/releases/download/${PANEL_VERSION}"
+    curl -fL --proto '=https' --retry 3 -o "$tmp/panel.tar.gz" "$base/panel.tar.gz"
+    note "Verifying the download"
+    verify_sha256 "$tmp/panel.tar.gz" "$base/checksum.txt" panel.tar.gz || {
+        rm -rf "$tmp"
+        return 1
+    }
     mkdir -p "$PANEL_DIR"
     note "Extracting"
-    tar -xzf "$tmp/panel.tar.gz" -C "$PANEL_DIR"
+    tar -xzf "$tmp/panel.tar.gz" -C "$PANEL_DIR" --no-same-owner
     rm -rf "$tmp"
     chmod -R 755 "$PANEL_DIR"/storage/* "$PANEL_DIR"/bootstrap/cache/
     [[ -f $PANEL_DIR/.env ]] || cp "$PANEL_DIR/.env.example" "$PANEL_DIR/.env"
@@ -1804,18 +2490,22 @@ t_panel_download() {
 }
 
 t_composer() {
-    mkdir -p "$TOOLS_DIR"
+    mkdir -p "$TOOLS_DIR" "$ART_HOME"
+    chmod 755 "$TOOLS_DIR"
+    chown "$WEB_USER:$WEB_USER" "$ART_HOME"
     note "Downloading Composer"
-    curl -fsSL --retry 3 -o "$TOOLS_DIR/composer.phar.new" https://getcomposer.org/download/latest-stable/composer.phar
+    curl -fsSL --proto '=https' --retry 3 -o "$TOOLS_DIR/composer.phar.new" https://getcomposer.org/download/latest-stable/composer.phar
     local expected
-    expected=$(curl -fsSL --retry 3 https://getcomposer.org/download/latest-stable/composer.phar.sha256 | awk '{print $1}')
+    expected=$(curl -fsSL --proto '=https' --retry 3 https://getcomposer.org/download/latest-stable/composer.phar.sha256 | awk '{print $1}')
+    [[ $expected =~ ^[0-9a-f]{64}$ ]]
     echo "$expected  $TOOLS_DIR/composer.phar.new" | sha256sum -c -
     mv "$TOOLS_DIR/composer.phar.new" "$TOOLS_DIR/composer.phar"
+    chmod 644 "$TOOLS_DIR/composer.phar"
     note "composer install (takes a few minutes)"
-    cd "$PANEL_DIR"
-    COMPOSER_ALLOW_SUPERUSER=1 COMPOSER_HOME=/root/.config/composer \
-        "$PHP_BIN" "$TOOLS_DIR/composer.phar" install --no-dev --optimize-autoloader --no-interaction --no-progress
+    # Run Composer as the web user, not root: package scripts then can't touch the rest of the system.
     chown -R "$WEB_USER:$WEB_USER" "$PANEL_DIR"
+    (cd "$PANEL_DIR" && runuser -u "$WEB_USER" -- env HOME="$ART_HOME" COMPOSER_HOME="$ART_HOME/.composer" \
+        "$PHP_BIN" "$TOOLS_DIR/composer.phar" install --no-dev --optimize-autoloader --no-interaction --no-progress)
 }
 
 t_panel_configure() {
@@ -1834,8 +2524,14 @@ t_panel_configure() {
         --settings-ui=true --telemetry="$TELEMETRY"
     if [[ $TELEMETRY == 1 ]]; then set_env PTERODACTYL_TELEMETRY_ENABLED true; else set_env PTERODACTYL_TELEMETRY_ENABLED false; fi
     note "Writing database settings"
-    art p:environment:database --no-interaction \
-        --host=127.0.0.1 --port=3306 --database=panel --username=pterodactyl --password="$DB_PASS"
+    # Written straight into .env (what p:environment:database does) so the password never shows up in
+    # the process list.
+    set_env DB_HOST 127.0.0.1
+    set_env DB_PORT 3306
+    set_env DB_DATABASE panel
+    set_env DB_USERNAME pterodactyl
+    set_env DB_PASSWORD "$DB_PASS"
+    MYSQL_PWD="$DB_PASS" mariadb -h 127.0.0.1 -P 3306 -u pterodactyl panel -e 'SELECT 1' >/dev/null
     if [[ $MAIL_SETUP == yes ]]; then
         note "Writing email settings"
         local enc=$SMTP_ENC
@@ -1992,8 +2688,14 @@ t_docker() {
 
 t_wings_bin() {
     note "Downloading Wings"
-    curl -fL --retry 3 -o /usr/local/bin/wings.new \
-        "https://github.com/pterodactyl/wings/releases/latest/download/wings_linux_${WINGS_ARCH}"
+    local base="https://github.com/pterodactyl/wings/releases/latest/download"
+    mkdir -p /usr/local/bin
+    curl -fL --proto '=https' --retry 3 -o /usr/local/bin/wings.new "$base/wings_linux_${WINGS_ARCH}"
+    note "Verifying the download"
+    verify_sha256 /usr/local/bin/wings.new "$base/checksums.txt" "wings_linux_${WINGS_ARCH}" || {
+        rm -f /usr/local/bin/wings.new
+        return 1
+    }
     chmod 755 /usr/local/bin/wings.new
     /usr/local/bin/wings.new version
     mv /usr/local/bin/wings.new /usr/local/bin/wings
@@ -2055,7 +2757,10 @@ t_node() {
     fi
     note "Writing /etc/pterodactyl/config.yml"
     mkdir -p /etc/pterodactyl
-    art p:node:configuration "$node_id" --format=yaml >/etc/pterodactyl/config.yml.new
+    (
+        umask 077
+        art p:node:configuration "$node_id" --format=yaml >/etc/pterodactyl/config.yml.new
+    )
     grep -q '^token:' /etc/pterodactyl/config.yml.new
     mv /etc/pterodactyl/config.yml.new /etc/pterodactyl/config.yml
     chmod 600 /etc/pterodactyl/config.yml
@@ -2067,9 +2772,12 @@ t_wings_config() {
         note "Fetching the configuration from the panel"
         local -a args=(configure --panel-url "$W_PANEL_URL" --token "$W_TOKEN" --node "$W_NODE_ID")
         [[ $W_OVERRIDE == true ]] && args+=(--override)
-        (cd /etc/pterodactyl && /usr/local/bin/wings "${args[@]}")
+        (umask 077 && cd /etc/pterodactyl && /usr/local/bin/wings "${args[@]}")
     else
-        printf '%s' "$W_CONFIG_TEXT" >/etc/pterodactyl/config.yml.new
+        (
+            umask 077
+            printf '%s' "$W_CONFIG_TEXT" >/etc/pterodactyl/config.yml.new
+        )
         grep -q 'token:' /etc/pterodactyl/config.yml.new
         mv /etc/pterodactyl/config.yml.new /etc/pterodactyl/config.yml
     fi
@@ -2273,7 +2981,9 @@ finish() {
     local k
     for k in "${!steps[@]}"; do
         printf '    %s%s%d%s  ' "$B" "$ACC" $((k + 1)) "$R"
-        printf '%s\n' "${steps[k]}" | fold -s -w $((COLS - 12)) | sed '2,$s/^/       /'
+        wrap "${steps[k]}" $((COLS - 12))
+        printf '%s\n' "${WRAPPED[0]}"
+        ((${#WRAPPED[@]} > 1)) && printf '       %s\n' "${WRAPPED[@]:1}"
     done
     blank
     title "Handy commands"
@@ -2281,8 +2991,15 @@ finish() {
     kv "Panel status" "systemctl status pteroq"
     kv "Install log" "$LOG_FILE"
 
-    rm -f "$ANSWERS_FILE" "$RUNTIME_FILE" "$STATUS_FILE"
-    date '+%F %T' >"$STATE_DIR/completed"
+    rm -f "$STATUS_FILE"
+    if ((skipped > 0)); then
+        # Keep the saved answers so that running PteroArch again can retry the skipped steps.
+        blank
+        info "To retry the skipped step(s), run PteroArch again and choose 'Continue'."
+    else
+        rm -f "$ANSWERS_FILE" "$RUNTIME_FILE" "$DONE_FILE"
+        date '+%F %T' >"$STATE_DIR/completed"
+    fi
     blank
     $all_good && {
         printf '  %sHappy hosting!%s\n' "$MAG$B" "$R"
@@ -2308,7 +3025,7 @@ usage() {
     local b='' a='' g='' r=''
     if [[ -t 1 && -z ${NO_COLOR:-} ]]; then
         b=$'\e[1m'
-        a=$'\e[38;5;39m'
+        a=$'\e[36m'
         g=$'\e[2m'
         r=$'\e[0m'
     fi
@@ -2324,13 +3041,21 @@ usage() {
     ${a}--verbose${r}     Show every command's output while installing.
     ${a}--no-color${r}    Plain text without colors (NO_COLOR=1 works too).
     ${a}--no-anim${r}     No spinners or animations.
+    ${a}--no-keys${r}     No arrow-key menus: type numbers and press Enter instead.
+    ${a}--symbols=SET${r} Symbols to draw with: auto (default), rich, basic or ascii.
+    ${a}--ascii${r}       Same as --symbols=ascii. Use it if you see boxes or question marks.
+    ${a}--version${r}     Show the version.
     ${a}-h, --help${r}    Show this help.
+
+  ${b}Keys${r}
+    ${g}Menus:${r}      arrow keys, W/S or J/K to move - Enter to select - 1-9 to jump
+    ${g}Yes / no:${r}   Left/Right (or A/D, Y/N) to switch - Enter to confirm
+    ${g}Anywhere:${r}   ? for help - Esc to go back - Ctrl+C to stop
 
   ${b}Environment${r}
     ${a}PANEL_VERSION${r}=vX.Y.Z   Install this panel release instead of the newest 1.x.
 
   ${b}Good to know${r}
-    ${g}Type ? at any question marked (?) for help.${r}
     ${g}Progress is saved in $STATE_DIR - run it again to resume.${r}
     ${g}Log: $LOG_FILE${r}
 
@@ -2348,6 +3073,17 @@ main() {
         --verbose | -v) VERBOSE=true ;;
         --no-color | --no-colour) NO_COLOR_FLAG=true ;;
         --no-anim | --no-animation | --no-animations) NO_ANIM_FLAG=true ;;
+        --no-keys | --no-menu | --no-menus) KEYS_FLAG=false ;;
+        --ascii) SYMBOLS=ascii ;;
+        --symbols=auto | --symbols=rich | --symbols=basic | --symbols=ascii) SYMBOLS=${a#*=} ;;
+        --symbols | --symbols=*)
+            echo "--symbols needs one of: auto, rich, basic, ascii (for example --symbols=basic)"
+            exit 2
+            ;;
+        -V | --version)
+            echo "PteroArch $INSTALLER_VERSION"
+            exit 0
+            ;;
         -h | --help)
             usage
             exit 0
@@ -2364,9 +3100,10 @@ main() {
         exit 2
     }
 
-    init_ui
     trap restore_tty EXIT
-    trap on_interrupt INT TERM
+    init_ui
+    trap on_interrupt INT TERM HUP
+    exec 4>&1 # the screen, for wizard steps (see run_step)
 
     if ! $DRY_RUN; then
         [[ $EUID -eq 0 ]] || {
@@ -2377,6 +3114,10 @@ main() {
         chmod 700 "$STATE_DIR"
         touch "$LOG_FILE"
         chmod 600 "$LOG_FILE"
+        if command -v flock >/dev/null 2>&1; then
+            exec 9>"$STATE_DIR/lock"
+            flock -n 9 || die "PteroArch is already running in another terminal."
+        fi
     fi
 
     local resuming=false
@@ -2407,15 +3148,19 @@ main() {
             ;;
         quit) exit 0 ;;
         esac
-    elif ! $DRY_RUN && [[ -f $STATE_DIR/completed && ! -e $PANEL_DIR && ! -f /etc/pterodactyl/config.yml ]]; then
-        rm -f "$STATE_DIR/completed"
+    elif ! $DRY_RUN; then
+        # No unfinished install: progress markers left by an earlier, completed run must not make this
+        # run skip steps.
+        rm -f "$DONE_FILE" "$RUNTIME_FILE"
+        if [[ -f $STATE_DIR/completed && ! -e $PANEL_DIR && ! -f /etc/pterodactyl/config.yml ]]; then
+            rm -f "$STATE_DIR/completed"
+        fi
     fi
 
     if ! $resuming; then
         wz_welcome
-        wizard_steps
+        wizard 0
         [[ -z $DB_PASS ]] && DB_PASS=$(gen_hex 32)
-        set_php_vars
         review
     fi
 

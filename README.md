@@ -10,15 +10,15 @@ PteroArch is a friendly, step-by-step installer for [Pterodactyl](https://pterod
 
   ❯ How will people reach the panel?
 
-    1  I have a domain name pointing at this server (default)
-    2  Use the IP address only
-       No HTTPS - fine for testing on a home network.
-  ❯ Your choice (?) [1]: ?
   ╭─ Help ─────────────────────────────────────────────────────────────────╮
   │ A domain is a name like panel.example.com that points to your          │
   │ server's IP address. You create it at your domain provider with an 'A  │
   │ record'. No domain? Pick 2 - it works fine for testing at home.        │
   ╰────────────────────────────────────────────────────────────────────────╯
+  ❯ 1  I have a domain name pointing at this server
+    2  Use the IP address only
+       No HTTPS - fine for testing on a home network.
+  ↑↓ move · Enter select · ? help · Esc back
 ```
 
 _(In your terminal it's in color, with a spinning progress display while it installs.)_
@@ -28,9 +28,12 @@ _(In your terminal it's in color, with a spinning progress display while it inst
 ## ✨ What it does
 
 - 🧭 **Guides you through setup.** One question at a time, with sensible defaults. Press Enter to accept them.
-- 🙋 **Helps when you're unsure.** Type `?` at any question marked `(?)` for a plain-language explanation.
+- ⌨️ **Works with the arrow keys.** Move through menus with the arrows (or `W`/`S`), confirm with Enter, and press Esc to go back.
+- 🙋 **Helps when you're unsure.** Press `?` at any question marked `(?)` for a plain-language explanation.
 - 👀 **Lets you review everything first.** Nothing changes until you confirm on the review screen, and you can go back and edit any section.
 - 🎨 **Easy to follow.** Colors, a progress bar, live spinners and time estimates show what's happening and how long it usually takes.
+- 🖥️ **Looks right everywhere.** It adapts to your terminal: full symbols on a desktop terminal, simpler ones on the bare Linux console, plain ASCII on serial lines.
+- 🔏 **Checks what it downloads.** The panel, Wings and Composer downloads are verified against their published SHA-256 checksums.
 - 🔁 **Lets you recover from errors.** If a step fails, you see why and get a tip for fixing it, then you can try again, skip, or stop.
 - 💾 **Resumes where it stopped.** Run it again after quitting or rebooting and it continues from the last finished step.
 - 🔒 **Sets up HTTPS for you.** It gets free Let's Encrypt certificates and renews them automatically.
@@ -70,8 +73,11 @@ _Panel_ is the website you log into. _Wings_ is the agent that runs the game ser
 
 While you answer:
 
+- In menus, move with the **arrow keys** (or `W`/`S`, `J`/`K`, or a number) and press **Enter** to select.
+- For yes/no questions, switch with **←/→** (or `A`/`D`, `Y`/`N`) and press **Enter**.
 - Press **Enter** to accept the suggestion shown in `[brackets]`.
-- Type **`?`** for help on any question marked `(?)`.
+- Press **`?`** for help on any question marked `(?)`.
+- Press **Esc** to go back: first to the start of the current step, then to the previous step. What you already typed is kept as the suggestion.
 - Type a city for the timezone, like `warsaw` or `new york`. PteroArch finds the full name for you.
 - Leave the password empty to get a strong one generated for you.
 - Press **Ctrl+C** any time to stop. Nothing changes before the review screen, and an interrupted install can be resumed.
@@ -85,10 +91,16 @@ sudo bash installer.sh --dry-run    # answer the questions and see the plan, wit
 sudo bash installer.sh --verbose    # show the full command output instead of a spinner
 sudo bash installer.sh --no-color   # plain text without colors (NO_COLOR=1 works too)
 sudo bash installer.sh --no-anim    # no spinners or animations
+sudo bash installer.sh --no-keys    # no arrow-key menus: type a number and press Enter instead
+sudo bash installer.sh --ascii      # plain ASCII symbols only
+sudo bash installer.sh --symbols=basic   # auto (default), rich, basic or ascii
+sudo bash installer.sh --version
 sudo bash installer.sh --help
 ```
 
-Colors and animations switch off on their own when they can't work, for example when the output is redirected to a file. On terminals without Unicode, PteroArch uses plain ASCII symbols.
+Colors, animations and arrow-key menus switch off on their own when they can't work, for example when the output is redirected to a file or the answers are piped in. Without arrow-key menus you type a number and press Enter, and `<` goes back.
+
+**Seeing empty boxes or question marks instead of symbols?** PteroArch picks a symbol set that fits your terminal: `rich` for desktop terminals, `basic` (only line-drawing characters) for the Linux console, and `ascii` for serial consoles and non-UTF-8 locales. If the guess is wrong, for example on a machine with very few fonts installed, press **S** on the welcome screen to switch, or start with `--ascii`.
 
 To install a specific panel release instead of the newest 1.x:
 
@@ -123,6 +135,8 @@ Common fixes:
 | Let's Encrypt fails                              | Check that your domain points here and port 80 is open           |
 | Docker or firewall fails right after the upgrade | Reboot (a new kernel was installed), then run PteroArch again    |
 | Wings won't start                                | `journalctl -u wings -n 50`                                      |
+| Symbols show as boxes or `?`                     | Press **S** on the welcome screen, or run with `--ascii`         |
+| Arrow keys don't work in your terminal           | Run with `--no-keys` and type the numbers                        |
 
 The full log is in `/var/log/pteroarch.log`.
 
@@ -141,7 +155,8 @@ Services: `nginx`, `php-fpm-legacy`, `mariadb`, `valkey`, `pteroq`, `ptero-sched
 
 ## ⚠️ Good to know
 
-- PteroArch starts with a full system upgrade (`pacman -Syu`), because Arch doesn't support partial upgrades.
+- PteroArch starts with a full system upgrade (`pacman -Syu`), because Arch doesn't support partial upgrades. It refreshes `archlinux-keyring` first, so machines that haven't been updated in a while don't fail on signature errors.
+- If you skip a failed step, your answers are kept. Run PteroArch again and choose **Continue** to retry it.
 - It installs **Pterodactyl 1.x**, the stable line. Pterodactyl 2.0 is still in beta.
 - On a rolling-release system, a big PHP update can surprise you. If you chose Arch's main `php` package, consider pinning it.
 - Docker publishes game ports directly, so those ports are reachable even if your firewall would otherwise block them.

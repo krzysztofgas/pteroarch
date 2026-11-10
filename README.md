@@ -5,22 +5,33 @@
 PteroArch is a friendly, step-by-step installer for [Pterodactyl](https://pterodactyl.io), a free, open-source panel for running game servers (Minecraft, Rust, Valheim and many more) in Docker containers. Pterodactyl's official guides are written for Ubuntu and Debian. PteroArch does the Arch-specific work for you.
 
 ```
-  PteroArch · Pterodactyl for Arch Linux  Step 2 of 6
-  ────────────────────────────────────────────────────
-  How will people reach the panel?
+   PteroArch  Pterodactyl for Arch Linux  · Step 2 of 6
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━────────────────────────────────────────
 
-    1) I have a domain name pointing at this server
-    2) Use the IP address only (HTTP, no encryption — fine for testing on a LAN)
-  Choose [1]:
+  ❯ How will people reach the panel?
+
+    1  I have a domain name pointing at this server (default)
+    2  Use the IP address only
+       No HTTPS - fine for testing on a home network.
+  ❯ Your choice (?) [1]: ?
+  ╭─ Help ─────────────────────────────────────────────────────────────────╮
+  │ A domain is a name like panel.example.com that points to your          │
+  │ server's IP address. You create it at your domain provider with an 'A  │
+  │ record'. No domain? Pick 2 - it works fine for testing at home.        │
+  ╰────────────────────────────────────────────────────────────────────────╯
 ```
+
+_(In your terminal it's in color, with a spinning progress display while it installs.)_
 
 ---
 
 ## ✨ What it does
 
 - 🧭 **Guides you through setup.** One question at a time, with sensible defaults. Press Enter to accept them.
+- 🙋 **Helps when you're unsure.** Type `?` at any question marked `(?)` for a plain-language explanation.
 - 👀 **Lets you review everything first.** Nothing changes until you confirm on the review screen, and you can go back and edit any section.
-- 🔁 **Lets you recover from errors.** If a step fails, you see why and can retry, skip, or quit.
+- 🎨 **Easy to follow.** Colors, a progress bar, live spinners and time estimates show what's happening and how long it usually takes.
+- 🔁 **Lets you recover from errors.** If a step fails, you see why and get a tip for fixing it, then you can try again, skip, or stop.
 - 💾 **Resumes where it stopped.** Run it again after quitting or rebooting and it continues from the last finished step.
 - 🔒 **Sets up HTTPS for you.** It gets free Let's Encrypt certificates and renews them automatically.
 - 🧱 **Can configure a firewall.** It sets up ufw (or adds rules to firewalld) and keeps your SSH port open.
@@ -57,6 +68,14 @@ _Panel_ is the website you log into. _Wings_ is the agent that runs the game ser
    ```
 3. Answer the questions, check the review screen, and press **Enter** to install.
 
+While you answer:
+
+- Press **Enter** to accept the suggestion shown in `[brackets]`.
+- Type **`?`** for help on any question marked `(?)`.
+- Type a city for the timezone, like `warsaw` or `new york`. PteroArch finds the full name for you.
+- Leave the password empty to get a strong one generated for you.
+- Press **Ctrl+C** any time to stop. Nothing changes before the review screen, and an interrupted install can be resumed.
+
 That's it ☕ An install usually takes 5–15 minutes. At the end you get your login details. They're also saved (readable by root only) in `/root/pterodactyl-credentials.txt`.
 
 ## 🛠️ Options
@@ -64,8 +83,12 @@ That's it ☕ An install usually takes 5–15 minutes. At the end you get your l
 ```bash
 sudo bash installer.sh --dry-run    # answer the questions and see the plan, without installing anything
 sudo bash installer.sh --verbose    # show the full command output instead of a spinner
+sudo bash installer.sh --no-color   # plain text without colors (NO_COLOR=1 works too)
+sudo bash installer.sh --no-anim    # no spinners or animations
 sudo bash installer.sh --help
 ```
+
+Colors and animations switch off on their own when they can't work, for example when the output is redirected to a file. On terminals without Unicode, PteroArch uses plain ASCII symbols.
 
 To install a specific panel release instead of the newest 1.x:
 
@@ -83,12 +106,14 @@ Adding more game machines later? Run PteroArch on each one and choose **Wings on
 
 ## 🩺 If something goes wrong
 
-PteroArch shows the last lines of output and a hint for the failed step. Then you can choose:
+PteroArch shows the last lines of output in a red box, along with a "What usually helps" tip for that step. Then you can choose:
 
-- **Retry**: fix the problem (a second terminal is handy) and try again
+- **Try again**: fix the problem (a second terminal is handy) and retry
 - **Skip**: continue without that step
-- **Show log**: read everything that step printed
-- **Quit**: stop now and run the script again later to resume
+- **Show the full output**: read everything that step printed
+- **Stop for now**: quit and run the script again later to resume
+
+At the end, a health check shows which services are running. You'll see **All done!** only when everything checks out.
 
 Common fixes:
 

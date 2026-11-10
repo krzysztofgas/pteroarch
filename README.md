@@ -47,13 +47,13 @@ _Panel_ is the website you log into. _Wings_ is the agent that runs the game ser
 
 ## 🚀 Quick start
 
-1. Copy `pteroarch.sh` to your server, for example:
+1. Copy `installer.sh` to your server, for example:
    ```bash
-   scp pteroarch.sh root@your-server:/root/
+   scp installer.sh root@your-server:/root/
    ```
 2. Run it as root:
    ```bash
-   sudo bash pteroarch.sh
+   sudo bash installer.sh
    ```
 3. Answer the questions, check the review screen, and press **Enter** to install.
 
@@ -62,15 +62,15 @@ That's it ☕ An install usually takes 5–15 minutes. At the end you get your l
 ## 🛠️ Options
 
 ```bash
-sudo bash pteroarch.sh --dry-run    # answer the questions and see the plan, without installing anything
-sudo bash pteroarch.sh --verbose    # show the full command output instead of a spinner
-sudo bash pteroarch.sh --help
+sudo bash installer.sh --dry-run    # answer the questions and see the plan, without installing anything
+sudo bash installer.sh --verbose    # show the full command output instead of a spinner
+sudo bash installer.sh --help
 ```
 
 To install a specific panel release instead of the newest 1.x:
 
 ```bash
-sudo PANEL_VERSION=v1.15.2 bash pteroarch.sh
+sudo PANEL_VERSION=v1.15.2 bash installer.sh
 ```
 
 ## 🎮 After installing
